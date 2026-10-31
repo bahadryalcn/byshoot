@@ -1,0 +1,255 @@
+html.capture-mode,
+html.capture-mode body {
+  inline-size: 100%;
+  block-size: 100%;
+  margin: 0;
+  overflow: clip;
+  scrollbar-gutter: auto;
+}
+.capture-editor {
+  position: fixed;
+  inset: 0;
+  overflow: clip;
+  font:
+    12px "Segoe UI",
+    sans-serif;
+  color: oklch(95% 0.008 165);
+  background: oklch(19% 0.018 165);
+  user-select: none;
+  --capture-panel: oklch(23% 0.02 165);
+  --capture-accent: oklch(82% 0.12 165);
+}
+.capture-canvas {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+  touch-action: none;
+}
+.capture-guide {
+  box-sizing: border-box;
+  position: absolute;
+  inset-block-start: 16px;
+  inset-inline-start: 50%;
+  translate: -50% 0;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding-block: 9px;
+  padding-inline: 13px;
+  background: var(--capture-panel);
+  border: 1px solid oklch(38% 0.02 165);
+  border-radius: 8px;
+  white-space: normal;
+  flex-wrap: wrap;
+  pointer-events: none;
+}
+.capture-guide strong {
+  letter-spacing: 0.08em;
+  font-size: 10px;
+  color: var(--capture-accent);
+}
+.capture-guide kbd {
+  margin: 0;
+  background: oklch(32% 0.02 165);
+  border: 0;
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-size: 10px;
+}
+.capture-dock {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  inline-size: max-content;
+  max-inline-size: calc(100% - 16px);
+  overflow: auto;
+}
+.capture-tools,
+.capture-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid oklch(38% 0.02 165);
+  border-radius: 8px;
+  background: var(--capture-panel);
+  box-shadow: 0 3px 10px oklch(0% none none / 0.2);
+  max-inline-size: 100%;
+}
+.capture-tools {
+  flex-direction: row;
+  inline-size: max-content;
+}
+.capture-editor button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font:
+    500 11px "Segoe UI",
+    sans-serif;
+  cursor: pointer;
+  block-size: 30px;
+  padding-inline: 9px;
+  white-space: nowrap;
+}
+.capture-editor svg {
+  inline-size: 16px;
+  block-size: 16px;
+  flex: none;
+}
+.capture-tools button {
+  inline-size: 28px;
+  padding: 0;
+  flex: none;
+}
+.capture-editor button:focus-visible,
+.capture-editor input:focus-visible {
+  outline: 2px solid var(--capture-accent);
+  outline-offset: 2px;
+}
+.capture-editor button:active {
+  background: oklch(38% 0.04 165);
+}
+.capture-editor button[aria-pressed="true"],
+.capture-editor .primary {
+  background: var(--capture-accent);
+  color: oklch(20% 0.03 165);
+}
+.capture-editor button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.capture-tools input[type="color"] {
+  inline-size: 25px;
+  block-size: 26px;
+  flex: none;
+  border: 0;
+  background: transparent;
+  padding: 3px;
+  cursor: pointer;
+}
+.capture-tools input[type="range"] {
+  inline-size: 45px;
+  accent-color: var(--capture-accent);
+  margin-inline: 5px;
+  margin-block: 0;
+}
+.capture-dimensions {
+  position: absolute;
+  font:
+    10px ui-monospace,
+    monospace;
+  background: var(--capture-panel);
+  padding-block: 4px;
+  padding-inline: 6px;
+  border-radius: 4px;
+  pointer-events: none;
+}
+.capture-toast {
+  box-sizing: border-box;
+  position: absolute;
+  margin: 0;
+  inline-size: fit-content;
+  max-inline-size: calc(100% - 32px);
+  overflow: auto;
+  overflow-wrap: anywhere;
+  background: var(--capture-panel);
+  padding-block: 10px;
+  padding-inline: 13px;
+  border: 1px solid oklch(45% 0.04 165);
+  border-radius: 8px;
+  pointer-events: none;
+}
+.capture-editor [hidden],
+.capture-toast:empty {
+  display: none;
+}
+.capture-editor.busy .capture-actions button,
+.capture-editor.busy .capture-tools {
+  pointer-events: none;
+  opacity: 0.5;
+}
+.capture-dialog {
+  box-sizing: border-box;
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  inline-size: 388px;
+  max-inline-size: calc(100vw - 32px);
+  overflow: auto;
+  overflow-wrap: anywhere;
+  border: 1px solid oklch(40% 0.02 165);
+  border-radius: 10px;
+  background: var(--capture-panel);
+  color: oklch(95% 0.008 165);
+  padding: 18px;
+}
+.capture-dialog::backdrop {
+  background: oklch(0% none none / 0.45);
+}
+.capture-dialog h2 {
+  font-size: 17px;
+  margin-block: 0 8px;
+}
+.capture-dialog p {
+  font-size: 12px;
+  line-height: 1.6;
+  color: oklch(80% 0.015 165);
+}
+.capture-dialog textarea {
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-block-size: 84px;
+  max-block-size: 200px;
+  resize: vertical;
+  padding: 9px;
+  border: 1px solid oklch(40% 0.02 165);
+  border-radius: 6px;
+  background: oklch(18% 0.02 165);
+  color: inherit;
+  font:
+    14px "Segoe UI",
+    sans-serif;
+  user-select: text;
+}
+.capture-dialog textarea:focus-visible {
+  outline: 2px solid var(--capture-accent);
+  outline-offset: 2px;
+}
+.capture-dialog form > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-block-start: 14px;
+}
+.capture-dialog .upload-confirm {
+  background: var(--capture-accent);
+  color: oklch(20% 0.03 165);
+}
+.capture-demo-ended {
+  display: grid;
+  place-items: center;
+  min-block-size: 100dvh;
+  font:
+    14px "Segoe UI",
+    sans-serif;
+  background: oklch(20% 0.02 165);
+  color: oklch(94% 0.01 165);
+}
+@media (hover: hover) and (pointer: fine) {
+  .capture-editor button:hover:not(:disabled) {
+    background: oklch(33% 0.025 165);
+  }
+  .capture-editor button[aria-pressed="true"]:hover,
+  .capture-editor .primary:hover {
+    background: color-mix(in oklch, var(--capture-accent), white 12%);
+  }
+}

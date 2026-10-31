@@ -1,0 +1,311 @@
+.recording-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-block: 18px 14px;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.recording-view [hidden] {
+  display: none !important;
+}
+.recording-heading h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.5px;
+  line-height: 1.25;
+}
+.recording-heading p {
+  margin: 5px 0 0;
+  color: var(--muted);
+}
+.recording-view svg {
+  inline-size: 16px;
+  block-size: 16px;
+  flex: none;
+}
+.recording-mode {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  margin: 0;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--surface), var(--ink) 3%);
+}
+.recording-mode label {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-block-size: 36px;
+  padding: 7px 10px;
+  border-radius: 5px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.recording-mode input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+}
+.recording-mode small {
+  margin-inline-start: auto;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.recording-mode label:has(input:checked) {
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 650;
+}
+.recording-mode label:has(input:focus-visible) {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+  z-index: 1;
+}
+.recording-mode label:has(input:disabled) {
+  cursor: default;
+}
+.recording-mode label:has(input:disabled:not(:checked)) {
+  opacity: 0.6;
+}
+.recording-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.recording-view[data-mode="audio"] .recording-fields {
+  grid-template-columns: 1fr;
+}
+.recording-fields > label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-inline-size: 0;
+}
+.recording-field-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.recording-field-label svg {
+  color: var(--muted);
+  inline-size: 14px;
+  block-size: 14px;
+}
+.recording-fields select {
+  inline-size: 100%;
+  min-block-size: 35px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+.recording-fields select:disabled {
+  color: var(--muted);
+  opacity: 1;
+  background: color-mix(in oklch, var(--surface), var(--ink) 2%);
+}
+.recording-view p.recording-input-hint {
+  margin: -5px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.recording-help {
+  margin-block-start: -5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.recording-help summary,
+.recording-recovery summary {
+  cursor: pointer;
+  inline-size: fit-content;
+  text-underline-offset: 3px;
+}
+.recording-help p {
+  margin: 6px 0 0;
+  max-inline-size: 65ch;
+  line-height: 1.55;
+}
+.recording-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-block-start: 12px;
+  border-block-start: 1px solid var(--line);
+}
+.recording-state {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-block-size: 20px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.recording-indicator {
+  inline-size: 6px;
+  block-size: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+.recording-clock {
+  margin-inline-start: auto;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.recording-view[data-state="recording"] .recording-indicator,
+.recording-view[data-state="stopping"] .recording-indicator {
+  background: oklch(48% 0.17 25);
+}
+.recording-view[data-state="recording"] [data-state],
+.recording-view[data-state="stopping"] [data-state] {
+  color: oklch(43% 0.15 25);
+}
+.recording-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.recording-buttons button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-block-size: 36px;
+  padding: 8px 13px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.recording-buttons button.recording-primary {
+  border-color: transparent;
+  background: var(--mint);
+}
+.recording-buttons button.recording-stop {
+  border-color: color-mix(in oklch, var(--line), oklch(48% 0.17 25) 25%);
+  color: oklch(43% 0.15 25);
+}
+.recording-stop svg {
+  inline-size: 13px;
+  block-size: 13px;
+  fill: currentColor;
+  stroke-width: 0;
+}
+.recording-buttons button.recording-refresh {
+  margin-inline-start: auto;
+  padding-inline: 9px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 500;
+}
+.recording-button-dot {
+  inline-size: 7px;
+  block-size: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+.recording-buttons button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.recording-view[aria-busy="true"] .recording-buttons button:disabled {
+  cursor: progress;
+}
+.recording-status {
+  margin: 0;
+  max-block-size: 96px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+.recording-status[data-tone="error"] {
+  color: oklch(42% 0.14 25);
+}
+.recording-status[data-tone="success"] {
+  color: oklch(36% 0.09 163);
+}
+.recording-recovery {
+  color: var(--muted);
+  font-size: 11px;
+}
+.recording-recovery summary {
+  color: var(--ink);
+  font-weight: 600;
+}
+.recording-recovery p {
+  margin: 5px 0 3px;
+}
+.recording-recovery code {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.5;
+  user-select: text;
+}
+.recording-view :focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 3px;
+}
+.recording-view ::selection {
+  background: var(--mint);
+  color: var(--ink);
+}
+@media (hover: hover) and (pointer: fine) {
+  .recording-mode label:hover:not(:has(input:disabled)) {
+    color: var(--ink);
+  }
+  .recording-buttons button:not(:disabled):hover {
+    background: color-mix(in oklch, var(--surface), var(--ink) 4%);
+  }
+  .recording-buttons button.recording-primary:not(:disabled):hover {
+    background: color-mix(in oklch, var(--mint), var(--surface) 15%);
+  }
+  .recording-help summary:hover,
+  .recording-recovery summary:hover {
+    text-decoration: underline;
+  }
+}
+@media (max-width: 440px) {
+  .recording-fields {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .recording-mode label {
+    padding-inline: 7px;
+    gap: 5px;
+  }
+  .recording-mode small {
+    font-size: 9px;
+  }
+  .recording-view {
+    gap: 11px;
+  }
+}

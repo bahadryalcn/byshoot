@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop",
+  "description": "Local ByShoot windows; native privileged operations are implemented by scoped Rust commands.",
+  "windows": ["main", "capture"],
+  "permissions": ["core:default"]
+}
