@@ -264,7 +264,11 @@ fn get_settings(app: tauri::AppHandle) -> Settings {
 }
 #[tauri::command]
 fn get_native_status(app: tauri::AppHandle) -> serde_json::Value {
-    serde_json::json!({"shortcutError":app.state::<AppState>().shortcut_error.lock().unwrap().clone()})
+    serde_json::json!({
+        "shortcutError": app.state::<AppState>().shortcut_error.lock().unwrap().clone(),
+        "nativeVersion": app.package_info().version.to_string(),
+        "executablePath": std::env::current_exe().ok().map(|path| path.to_string_lossy().into_owned())
+    })
 }
 #[tauri::command]
 fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<()> {

@@ -331,6 +331,11 @@ async function start() {
   }
   try {
     const diagnostic = await api.status();
+    if (diagnostic.nativeVersion) {
+      const version = app.querySelector<HTMLElement>(".version")!;
+      version.textContent = diagnostic.nativeVersion;
+      version.title = diagnostic.executablePath ?? "";
+    }
     if (diagnostic.shortcutError)
       showError(
         `Sistem kısayolu kaydedilemedi: ${diagnostic.shortcutError}. Ayarlar → Kısayollar bölümünden başka bir tuş seç.`,

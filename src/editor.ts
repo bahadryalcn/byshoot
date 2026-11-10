@@ -442,6 +442,9 @@ export async function mountEditor(
     toast.hidden = true;
     if (selection && tool !== "select" && inside(p, selection)) {
       if (tool === "text") {
+        // The dialog opens during pointerdown. Prevent the original canvas
+        // gesture's default focus step from stealing focus back from its input.
+        e.preventDefault();
         canvas.releasePointerCapture(e.pointerId);
         void addText(p);
         return;

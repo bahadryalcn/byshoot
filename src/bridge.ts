@@ -7,11 +7,16 @@ import type {
 } from "./contracts";
 import { defaultSettings } from "./contracts";
 export const native = isTauri();
+export interface NativeStatus {
+  shortcutError: string | null;
+  nativeVersion?: string;
+  executablePath?: string | null;
+}
 export const api = {
   status: () =>
     native
-      ? invoke<{ shortcutError: string | null }>("get_native_status")
-      : Promise.resolve({ shortcutError: null }),
+      ? invoke<NativeStatus>("get_native_status")
+      : Promise.resolve<NativeStatus>({ shortcutError: null }),
   getSettings: () =>
     native
       ? invoke<Settings>("get_settings")

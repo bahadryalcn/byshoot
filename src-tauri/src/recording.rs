@@ -2,10 +2,13 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 use tauri::Manager;
@@ -27,6 +30,7 @@ struct Session {
     path: PathBuf,
     log: PathBuf,
     started: Instant,
+    progress: Arc<AtomicU64>,
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -64,14 +68,116 @@ pub struct RecordingOptions {
     audio_device: Option<String>,
 }
 
+fn ffmpeg_candidates(
+    executable_dir: Option<&Path>,
+    profile: Option<&Path>,
+    local_appdata: Option<&Path>,
+    search_path: Option<&std::ffi::OsStr>,
+) -> Vec<PathBuf> {
+    let name = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    let mut candidates = Vec::new();
+    if let Some(dir) = executable_dir {
+        candidates.push(dir.join(name));
+        candidates.push(dir.join("resources").join(name));
+    }
+    if let Some(path) = search_path {
+        candidates.extend(
+            std::env::split_paths(path)
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.join(name)),
+        );
+    }
+    // Explorer and startup launches can inherit a PATH from before FFmpeg was
+    // installed. Resolve standard per-user installations without requiring a reboot.
+    if let Some(profile) = profile {
+        candidates.push(profile.join("scoop/apps/ffmpeg/current/bin").join(name));
+        candidates.push(profile.join("scoop/shims").join(name));
+    }
+    if let Some(local) = local_appdata {
+        candidates.push(local.join("Microsoft/WinGet/Links").join(name));
+    }
+    candidates
+}
+fn resolve_ffmpeg() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("BYSHOOT_FFMPEG")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+    {
+        return Some(path);
+    }
+    let executable = std::env::current_exe().ok();
+    let profile = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let path = std::env::var_os("PATH");
+    ffmpeg_candidates(
+        executable.as_ref().and_then(|p| p.parent()),
+        profile.as_deref(),
+        local.as_deref(),
+        path.as_deref(),
+    )
+    .into_iter()
+    .find(|p| p.is_file())
+}
 fn command() -> Command {
-    let mut c = Command::new("ffmpeg");
+    let mut c = Command::new(resolve_ffmpeg().unwrap_or_else(|| PathBuf::from("ffmpeg")));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x08000000);
     }
     c
+}
+fn spawn_session(args: Vec<String>, path: PathBuf, log: PathBuf) -> Result<Session> {
+    let stderr = fs::File::create(&log).map_err(crate::error)?;
+    let mut child=command().args(args).args(["-progress","pipe:1","-stats_period","0.2"]).arg(&path)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(stderr).spawn()
+        .map_err(|e|format!("FFmpeg başlatılamadı: {e}. ffmpeg.exe dosyasını uygulamanın yanına koyun veya FFmpeg kurulumunu kontrol edin."))?;
+    let stdout = child.stdout.take().ok_or("Kayıt ilerlemesi okunamadı.")?;
+    let progress = Arc::new(AtomicU64::new(0));
+    let reported = progress.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout)
+            .lines()
+            .map_while(std::result::Result::ok)
+        {
+            if let Some(value) = line
+                .strip_prefix("out_time_us=")
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                reported.fetch_max(value, Ordering::Relaxed);
+            }
+        }
+    });
+    Ok(Session {
+        child,
+        path,
+        log,
+        started: Instant::now(),
+        progress,
+    })
+}
+fn await_first_media(session: &mut Session) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        if let Some(exit) = session.child.try_wait().map_err(crate::error)? {
+            return Err(format!(
+                "Kayıt başlatılamadı ({exit}). {}",
+                log_tail(&session.log)
+            ));
+        }
+        if session.progress.load(Ordering::Relaxed) > 0 {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let _ = finish_child(&mut session.child);
+            return Err(format!("Ekrandan veya ses girişinden veri alınamadı. Girişi kontrol edip yeniden deneyin. {}",log_tail(&session.log)));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 fn device_names(log: &str) -> Vec<String> {
     log.lines()
@@ -428,21 +534,7 @@ pub async fn start_recording(app: tauri::AppHandle, options: RecordingOptions) -
             extension
         ));
         let log = path.with_extension("log");
-        let stderr = fs::File::create(&log).map_err(crate::error)?;
-        let child = command()
-            .args(args)
-            .arg(&path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(stderr)
-            .spawn()
-            .map_err(|e| format!("FFmpeg başlatılamadı: {e}. ffmpeg.exe PATH içinde olmalı."))?;
-        inner.session = Some(Session {
-            child,
-            path,
-            log,
-            started: Instant::now(),
-        });
+        inner.session = Some(spawn_session(args, path, log)?);
         inner.error = None;
         let name = inner
             .session
@@ -460,10 +552,13 @@ pub async fn start_recording(app: tauri::AppHandle, options: RecordingOptions) -
             inner.session = None;
             return Err(format!("Kurtarma bilgisi yazılamadı: {e}"));
         }
-        std::thread::sleep(Duration::from_millis(300));
-        update(&mut inner);
-        if inner.session.is_none() {
-            return Err(inner.error.clone().unwrap_or("Kayıt başlatılamadı.".into()));
+        if let Err(e) = await_first_media(inner.session.as_mut().unwrap()) {
+            let session = inner.session.take().unwrap();
+            if valid_media(&session.path) {
+                inner.pending = Some(session.path.clone());
+            }
+            inner.error = Some(format!("{e} Kurtarma: {}", session.path.display()));
+            return Err(inner.error.clone().unwrap());
         }
         Ok(())
     })
@@ -744,6 +839,122 @@ mod tests {
             None
         )
         .is_err());
+    }
+    #[test]
+    fn gui_launch_resolves_per_user_ffmpeg_without_inherited_path() {
+        let directory = save_test_directory("stale-gui-path");
+        let bin = directory.join("scoop/apps/ffmpeg/current/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let executable = bin.join(if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        });
+        fs::write(&executable, b"candidate").unwrap();
+        let resolved = ffmpeg_candidates(None, Some(&directory), None, None)
+            .into_iter()
+            .find(|path| path.is_file());
+        assert_eq!(resolved, Some(executable.clone()));
+        fs::remove_file(executable).unwrap();
+        let mut child = bin;
+        while child != directory {
+            fs::remove_dir(&child).unwrap();
+            child = child.parent().unwrap().to_path_buf();
+        }
+        fs::remove_dir(directory).unwrap();
+    }
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "Records each real monitor briefly to local temp files; explicit owner authorization required"]
+    fn real_desktop_video_finalize() {
+        let directory = save_test_directory("real-desktop");
+        let monitors = xcap::Monitor::all().expect("real monitor enumeration");
+        assert!(!monitors.is_empty());
+        for monitor in monitors {
+            let id = monitor.id().unwrap();
+            let geometry = (
+                monitor.x().unwrap(),
+                monitor.y().unwrap(),
+                monitor.width().unwrap(),
+                monitor.height().unwrap(),
+            );
+            let options = RecordingOptions {
+                mode: "video".into(),
+                monitor_id: Some(id),
+                audio_device: None,
+            };
+            let path = directory.join(format!("monitor-{id}.mp4"));
+            let log = path.with_extension("log");
+            let mut session = spawn_session(
+                recording_args(&options, Some(geometry)).unwrap(),
+                path.clone(),
+                log.clone(),
+            )
+            .expect("real production ffmpeg spawn");
+            await_first_media(&mut session).expect("real first media progress");
+            std::thread::sleep(Duration::from_secs(1));
+            let exit = finish_child(&mut session.child).unwrap();
+            assert!(
+                exit.success(),
+                "Monitor {id} at {geometry:?}: {}",
+                log_tail(&log)
+            );
+            assert!(
+                valid_media(&path),
+                "Monitor {id} has no actual encoded frames: {}",
+                log_tail(&log)
+            );
+            let decoded = command()
+                .args(["-hide_banner", "-loglevel", "error", "-i"])
+                .arg(&path)
+                .args(["-f", "null", "-"])
+                .output()
+                .unwrap();
+            assert!(
+                decoded.status.success(),
+                "Monitor {id} decode failed: {}",
+                String::from_utf8_lossy(&decoded.stderr)
+            );
+            let probe_path = resolve_ffmpeg().unwrap().with_file_name("ffprobe.exe");
+            let mut probe = Command::new(probe_path);
+            {
+                use std::os::windows::process::CommandExt;
+                probe.creation_flags(0x08000000);
+            }
+            let metadata = probe
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-count_frames",
+                    "-show_entries",
+                    "stream=width,height,nb_read_frames",
+                    "-of",
+                    "json",
+                ])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(metadata.status.success());
+            let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+            let video = &metadata["streams"][0];
+            assert_eq!(video["width"].as_u64(), Some(u64::from(geometry.2)));
+            assert_eq!(video["height"].as_u64(), Some(u64::from(geometry.3)));
+            assert!(
+                video["nb_read_frames"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()
+                    > 0
+            );
+            println!("REAL_DESKTOP_PASS monitor={id} geometry={geometry:?} bytes={} decoded=true metadata={video}",fs::metadata(&path).unwrap().len());
+            drop(session);
+            fs::remove_file(path).unwrap();
+            fs::remove_file(log).unwrap();
+        }
+        fs::remove_dir(directory).unwrap();
     }
     #[test]
     #[ignore = "Requires local FFmpeg; uses synthetic video and sound, never the user's screen/microphone"]
