@@ -1,0 +1,5 @@
+html.region-picker-mode, body.region-picker-mode, .region-picker-mode #app { width: 100%; height: 100%; margin: 0; background: transparent !important; overflow: hidden; }
+.region-picker { position: fixed; inset: 0; cursor: crosshair; background: rgba(0, 0, 0, .3); }
+.region-picker-help { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); color: white; background: #171717; border-radius: 6px; padding: 8px 12px; pointer-events: none; }
+.region-selection { position: absolute; border: 1px solid white; box-sizing: border-box; background: rgba(255, 255, 255, .12); pointer-events: none; }
+.region-selection span { position: absolute; left: 0; top: 100%; background: #171717; color: white; padding: 4px 8px; white-space: nowrap; }

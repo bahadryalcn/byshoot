@@ -176,15 +176,34 @@ pub fn capture_desktop() -> Result<DesktopFrame, String> {
         }
     }
     let layout = checked_layout(&bounds, coordinate_scale)?;
-    let rectangles = bounds
+    let rectangles: Vec<DesktopRect> = bounds
         .iter()
         .map(|bounds| monitor_rect(&layout, *bounds))
         .collect();
-    let mut image = allocate_desktop(&layout)?;
-    for (monitor, bounds) in monitors.iter().zip(bounds) {
-        let frame = monitor.capture_image().map_err(|e| e.to_string())?;
-        place_image(&mut image, &layout, bounds, frame)?;
-    }
+    #[cfg(target_os = "windows")]
+    let image = {
+        // One BitBlt of the whole virtual desktop: every monitor is frozen at the
+        // same instant, and CAPTUREBLT keeps layered windows (taskbar menus,
+        // thumbnail previews, transparent app windows) in the picture.
+        let _ = &monitors;
+        let mut image = gdi::capture_rect(
+            layout.origin_x,
+            layout.origin_y,
+            layout.width,
+            layout.height,
+        )?;
+        blacken_gaps(&mut image, &rectangles);
+        image
+    };
+    #[cfg(not(target_os = "windows"))]
+    let image = {
+        let mut image = allocate_desktop(&layout)?;
+        for (monitor, bounds) in monitors.iter().zip(bounds) {
+            let frame = monitor.capture_image().map_err(|e| e.to_string())?;
+            place_image(&mut image, &layout, bounds, frame)?;
+        }
+        image
+    };
     Ok(DesktopFrame {
         image,
         origin_x: layout.origin_x,
@@ -194,9 +213,245 @@ pub fn capture_desktop() -> Result<DesktopFrame, String> {
     })
 }
 
+/// Desktop areas no monitor covers are opaque black, like the composed fallback.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn blacken_gaps(image: &mut RgbaImage, monitors: &[DesktopRect]) {
+    let width = image.width();
+    let mut intervals = Vec::with_capacity(monitors.len());
+    for (y, row) in image.rows_mut().enumerate() {
+        let y = y as u32;
+        intervals.clear();
+        intervals.extend(
+            monitors
+                .iter()
+                .filter(|m| y >= m.y && y < m.y + m.height)
+                .map(|m| (m.x.min(width), (m.x + m.width).min(width))),
+        );
+        if intervals.iter().any(|&(a, b)| a == 0 && b == width) {
+            continue;
+        }
+        for (x, pixel) in row.enumerate() {
+            let x = x as u32;
+            if !intervals.iter().any(|&(a, b)| x >= a && x < b) {
+                pixel.0 = [0, 0, 0, 255];
+            }
+        }
+    }
+}
+
+/// Physical-pixel capture of one virtual-desktop rectangle, layered windows included.
+#[cfg(target_os = "windows")]
+pub fn capture_screen_rect(x: i32, y: i32, width: u32, height: u32) -> Result<RgbaImage, String> {
+    gdi::capture_rect(x, y, width, height)
+}
+
+#[cfg(target_os = "windows")]
+mod gdi {
+    use image::RgbaImage;
+    use std::{ffi::c_void, mem::size_of, ptr::null_mut};
+    type Handle = *mut c_void;
+    const SRCCOPY: u32 = 0x00CC_0020;
+    const CAPTUREBLT: u32 = 0x4000_0000;
+    #[repr(C)]
+    struct BitmapHeader {
+        size: u32,
+        width: i32,
+        height: i32,
+        planes: u16,
+        depth: u16,
+        compression: u32,
+        image_size: u32,
+        x_density: i32,
+        y_density: i32,
+        colors: u32,
+        important: u32,
+    }
+    #[repr(C)]
+    struct BitmapInfo {
+        header: BitmapHeader,
+        colors: [u32; 1],
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetDC(window: Handle) -> Handle;
+        fn ReleaseDC(window: Handle, dc: Handle) -> i32;
+    }
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn CreateCompatibleDC(dc: Handle) -> Handle;
+        fn DeleteDC(dc: Handle) -> i32;
+        fn DeleteObject(object: Handle) -> i32;
+        fn CreateDIBSection(
+            dc: Handle,
+            info: *const BitmapInfo,
+            usage: u32,
+            bits: *mut Handle,
+            section: Handle,
+            offset: u32,
+        ) -> Handle;
+        fn SelectObject(dc: Handle, object: Handle) -> Handle;
+        #[allow(clippy::too_many_arguments)]
+        fn BitBlt(
+            target: Handle,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            source: Handle,
+            source_x: i32,
+            source_y: i32,
+            operation: u32,
+        ) -> i32;
+        fn GdiFlush() -> i32;
+    }
+    struct ScreenDc(Handle);
+    impl Drop for ScreenDc {
+        fn drop(&mut self) {
+            unsafe {
+                ReleaseDC(null_mut(), self.0);
+            }
+        }
+    }
+    struct MemoryDc(Handle);
+    impl Drop for MemoryDc {
+        fn drop(&mut self) {
+            unsafe {
+                DeleteDC(self.0);
+            }
+        }
+    }
+    struct Object(Handle);
+    impl Drop for Object {
+        fn drop(&mut self) {
+            unsafe {
+                DeleteObject(self.0);
+            }
+        }
+    }
+    struct Selected {
+        dc: Handle,
+        previous: Handle,
+    }
+    impl Drop for Selected {
+        fn drop(&mut self) {
+            unsafe {
+                SelectObject(self.dc, self.previous);
+            }
+        }
+    }
+    fn failure(operation: &str) -> String {
+        format!(
+            "Ekran yakalanamadı ({operation}): {}",
+            std::io::Error::last_os_error()
+        )
+    }
+    pub fn capture_rect(x: i32, y: i32, width: u32, height: u32) -> Result<RgbaImage, String> {
+        if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
+            return Err("Geçersiz ekran boyutu.".into());
+        }
+        let length = width as usize * height as usize * 4;
+        // Declaration order makes drops run selection → bitmap → memory DC → screen DC.
+        unsafe {
+            let screen = ScreenDc(GetDC(null_mut()));
+            if screen.0.is_null() {
+                return Err(failure("GetDC"));
+            }
+            let memory = MemoryDc(CreateCompatibleDC(screen.0));
+            if memory.0.is_null() {
+                return Err(failure("CreateCompatibleDC"));
+            }
+            let info = BitmapInfo {
+                header: BitmapHeader {
+                    size: size_of::<BitmapHeader>() as u32,
+                    width: width as i32,
+                    // Negative height: top-down rows, matching RgbaImage.
+                    height: -(height as i32),
+                    planes: 1,
+                    depth: 32,
+                    compression: 0,
+                    image_size: 0,
+                    x_density: 0,
+                    y_density: 0,
+                    colors: 0,
+                    important: 0,
+                },
+                colors: [0],
+            };
+            let mut bits: Handle = null_mut();
+            let bitmap = CreateDIBSection(screen.0, &info, 0, &mut bits, null_mut(), 0);
+            if bitmap.is_null() || bits.is_null() {
+                return Err(failure("CreateDIBSection"));
+            }
+            let bitmap = Object(bitmap);
+            let previous = SelectObject(memory.0, bitmap.0);
+            if previous.is_null() {
+                return Err(failure("SelectObject"));
+            }
+            let selected = Selected {
+                dc: memory.0,
+                previous,
+            };
+            if BitBlt(
+                memory.0,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                screen.0,
+                x,
+                y,
+                SRCCOPY | CAPTUREBLT,
+            ) == 0
+            {
+                return Err(failure("BitBlt"));
+            }
+            GdiFlush();
+            let mut pixels = Vec::new();
+            pixels
+                .try_reserve_exact(length)
+                .map_err(|_| "Ekran görüntüsü için yeterli bellek yok.".to_string())?;
+            pixels.extend_from_slice(std::slice::from_raw_parts(bits as *const u8, length));
+            drop(selected);
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+                pixel[3] = 255;
+            }
+            RgbaImage::from_raw(width, height, pixels)
+                .ok_or_else(|| "Ekran görüntüsü oluşturulamadı.".to_string())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncovered_desktop_areas_become_opaque_black() {
+        let mut image = RgbaImage::from_pixel(4, 3, Rgba([9, 9, 9, 255]));
+        blacken_gaps(
+            &mut image,
+            &[
+                DesktopRect {
+                    x: 0,
+                    y: 1,
+                    width: 2,
+                    height: 2,
+                },
+                DesktopRect {
+                    x: 2,
+                    y: 0,
+                    width: 2,
+                    height: 3,
+                },
+            ],
+        );
+        assert_eq!(image.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert_eq!(image.get_pixel(1, 0).0, [0, 0, 0, 255]);
+        assert_eq!(image.get_pixel(2, 0).0, [9, 9, 9, 255]);
+        assert_eq!(image.get_pixel(0, 1).0, [9, 9, 9, 255]);
+        assert_eq!(image.get_pixel(3, 2).0, [9, 9, 9, 255]);
+    }
     use image::Rgba;
     fn b(x: i32, y: i32, width: u32, height: u32) -> Bounds {
         Bounds {
@@ -326,6 +581,22 @@ mod tests {
             frame.coordinate_scale,
             started.elapsed().as_millis()
         );
+        for monitor in &frame.monitors {
+            let lit = (monitor.y..monitor.y + monitor.height)
+                .step_by(7)
+                .flat_map(|y| {
+                    (monitor.x..monitor.x + monitor.width)
+                        .step_by(7)
+                        .map(move |x| (x, y))
+                })
+                .filter(|&(x, y)| frame.image.get_pixel(x, y).0[..3] != [0, 0, 0])
+                .count();
+            eprintln!(
+                "Monitor at ({}, {}): {lit} sampled non-black pixels",
+                monitor.x, monitor.y
+            );
+            assert!(lit > 0, "monitor area captured as solid black");
+        }
         assert!(!frame.monitors.is_empty());
         assert!(frame.image.width() > 0 && frame.image.height() > 0);
     }

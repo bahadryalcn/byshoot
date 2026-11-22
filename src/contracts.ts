@@ -11,7 +11,7 @@ export interface Settings {
   saveDirectory: string;
   launchAtStartup: boolean;
   proxyUrl: string;
-  uploadProvider: "lightshot" | "custom";
+  uploadProvider: "custom";
   uploadEndpoint: string;
   shortcuts: Record<CaptureAction, string[]>;
 }
@@ -27,7 +27,7 @@ export const defaultSettings: Settings = {
   saveDirectory: "",
   launchAtStartup: false,
   proxyUrl: "",
-  uploadProvider: "lightshot",
+  uploadProvider: "custom",
   uploadEndpoint: "",
   shortcuts: {
     region: ["PrintScreen", "CommandOrControl+Shift+S"],
@@ -50,4 +50,43 @@ export interface HistoryEntry {
   createdAt: string;
   kind: "save" | "copy" | "upload";
   location: string;
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+/**
+ * Deep-merges untrusted stored settings over the defaults so missing or
+ * wrongly typed fields never reach the UI. Legacy `lightshot` provider is
+ * migrated to `custom`.
+ */
+export function mergeSettings(stored: unknown): Settings {
+  const base = structuredClone(defaultSettings);
+  if (!isRecord(stored)) return base;
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, def] of Object.entries(base)) {
+    if (key === "shortcuts") continue;
+    const value = stored[key];
+    if (value !== undefined && value !== null && typeof value === typeof def)
+      out[key] = value;
+  }
+  const shortcuts = { ...base.shortcuts };
+  if (isRecord(stored.shortcuts)) {
+    for (const action of Object.keys(shortcuts) as CaptureAction[]) {
+      const list = stored.shortcuts[action];
+      if (Array.isArray(list))
+        shortcuts[action] = list.filter(
+          (item): item is string => typeof item === "string",
+        );
+    }
+  }
+  out.shortcuts = shortcuts;
+  const merged = out as unknown as Settings;
+  if (merged.language !== "tr" && merged.language !== "en")
+    merged.language = base.language;
+  if (merged.format !== "png" && merged.format !== "jpeg")
+    merged.format = base.format;
+  // Legacy "lightshot" (or anything unknown) migrates to the custom provider.
+  merged.uploadProvider = "custom";
+  return merged;
 }

@@ -253,3 +253,13 @@ html.capture-mode body {
     background: color-mix(in oklch, var(--capture-accent), white 12%);
   }
 }
+.capture-toast {
+  pointer-events: auto;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+.capture-toast button {
+  margin-inline-start: 10px;
+  cursor: pointer;
+}

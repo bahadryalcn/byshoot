@@ -1,4 +1,5 @@
 import type { Capture } from "./contracts";
+import { t } from "./i18n";
 export function captureViewportSize(
   capture: Pick<Capture, "width" | "height" | "scaleFactor">,
 ) {
@@ -29,9 +30,7 @@ export async function waitForCaptureViewport(
     const observer = new ResizeObserver(check);
     const timeout = setTimeout(() => {
       cleanup();
-      reject(
-        new Error("Ekran ölçeği hazırlanamadı. Yakalamayı yeniden başlatın."),
-      );
+      reject(new Error(t("editor.viewportTimeout")));
     }, 1500);
     function cleanup() {
       clearTimeout(timeout);

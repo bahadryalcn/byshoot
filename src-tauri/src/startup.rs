@@ -3,6 +3,56 @@ const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const APPROVAL: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
 const NAME: &str = "byshoot";
 
+pub struct Snapshot {
+    run: Option<windows_registry::Value>,
+    approval: Option<windows_registry::Value>,
+}
+
+fn value(path: &str) -> Result<Option<windows_registry::Value>, String> {
+    match windows_registry::CURRENT_USER
+        .open(path)
+        .and_then(|key| key.get_value(NAME))
+    {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if e.code().0 as u32 == 0x80070002 => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+pub fn snapshot() -> Result<Snapshot, String> {
+    Ok(Snapshot {
+        run: value(RUN)?,
+        approval: value(APPROVAL)?,
+    })
+}
+
+pub fn restore(snapshot: &Snapshot) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for (path, value) in [(RUN, &snapshot.run), (APPROVAL, &snapshot.approval)] {
+        let result = if let Some(value) = value {
+            windows_registry::CURRENT_USER
+                .create(path)
+                .and_then(|key| key.set_value(NAME, value))
+        } else {
+            match windows_registry::CURRENT_USER.open(path) {
+                Ok(key) => key.remove_value(NAME),
+                Err(e) if e.code().0 as u32 == 0x80070002 => continue,
+                Err(e) => Err(e),
+            }
+        };
+        if let Err(e) = result {
+            if e.code().0 as u32 != 0x80070002 {
+                errors.push(e.to_string());
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 fn command(path: &std::path::Path) -> String {
     format!("\"{}\" --background", path.display())
 }

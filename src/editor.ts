@@ -8,12 +8,27 @@ import {
   moveRect,
   cropBounds,
   paintStroke,
+  selectionHandles,
+  hitHandle,
+  resizeByHandle,
+  handleCursor,
+  isDegenerateStroke,
+  type HandleId,
   type Rect,
   type Point,
   type Stroke,
   type Tool,
 } from "./drawing";
 import "./editor.css";
+import { setLanguage, t } from "./i18n";
+import {
+  ANNOTATION_TEXT,
+  StrokeHistory,
+  hitTopmost,
+  strokeBounds,
+  translateStroke,
+  type TextMeasure,
+} from "./annotations";
 import {
   placeEditorPanels,
   guideMonitor,
@@ -50,7 +65,13 @@ export async function mountEditor(
   options: { demo?: boolean } = {},
 ) {
   const demo = options.demo || !native;
-  container.innerHTML = `<section class="capture-editor" aria-label="Ekran görüntüsü düzenleyici"><canvas class="capture-canvas" aria-label="Alan seçmek veya çizmek için sürükleyin"></canvas><div class="capture-guide"><strong>${demo ? "DEMO · BYSHOOT" : "BYSHOOT"}</strong><span>Yakalamak istediğiniz alanı seçin</span><kbd>Esc</kbd><span>Vazgeç</span></div><div class="capture-dimensions"></div><div class="capture-tools" role="toolbar" aria-label="Çizim araçları"></div><div class="capture-actions" role="toolbar" aria-label="Görüntü işlemleri"></div><div class="capture-toast" role="status" aria-live="polite"></div><dialog class="capture-dialog"><form method="dialog"><h2>Görüntüyü paylaş</h2><p>Bu görüntü herkese açık bir bağlantıyla paylaşılır. Hassas bilgileri gizlediğinizden emin olun.</p><div><button value="cancel">Vazgeç</button><button value="upload" class="upload-confirm">Yükle ve bağlantı oluştur</button></div></form></dialog></section>`;
+  // Editor runs in its own webview: load the saved language before building UI.
+  try {
+    setLanguage((await api.getSettings()).language);
+  } catch {
+    /* keep default language */
+  }
+  container.innerHTML = `<section class="capture-editor" aria-label="${t("editor.label")}"><canvas class="capture-canvas" aria-label="${t("editor.canvasLabel")}"></canvas><div class="capture-guide"><strong>${demo ? "DEMO · BYSHOOT" : "BYSHOOT"}</strong><span>${t("editor.guideSelect")}</span><kbd>Esc</kbd><span>${t("editor.cancel")}</span></div><div class="capture-dimensions"></div><div class="capture-tools" role="toolbar" aria-label="${t("editor.toolsLabel")}"></div><div class="capture-actions" role="toolbar" aria-label="${t("editor.actionsLabel")}"></div><div class="capture-toast" role="status" aria-live="polite"></div><dialog class="capture-dialog"><form method="dialog"><h2>${t("editor.shareTitle")}</h2><p>${t("editor.shareDefaultBody")}</p><div><button value="cancel">${t("editor.cancel")}</button><button value="upload" class="upload-confirm">${t("editor.shareConfirm")}</button></div></form></dialog></section>`;
   const root = container.querySelector<HTMLElement>(".capture-editor")!,
     canvas = root.querySelector<HTMLCanvasElement>("canvas")!;
   const displayCtx = canvas.getContext("2d", { alpha: false })!;
@@ -70,8 +91,9 @@ export async function mountEditor(
   let image = new Image(),
     capture: Capture | null = null,
     selection: Rect | null = null,
-    strokes: Stroke[] = [],
-    redo: Stroke[] = [],
+    hist = new StrokeHistory(),
+    selected: Stroke | null = null,
+    preview: Stroke | null = null,
     active: Stroke | null = null,
     tool: Tool = "select",
     color = "#fa5f55",
@@ -82,11 +104,24 @@ export async function mountEditor(
     generation = 0,
     frame = 0;
   let drag: {
-    kind: "select" | "move" | "resize" | "draw";
+    kind: "select" | "move" | "resize" | "draw" | "annotation";
+    stroke?: Stroke;
     start: Point;
     rect?: Rect;
-    anchor?: Point;
+    handle?: HandleId;
   } | null = null;
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  // Round both corners so badge size equals export cropBounds size exactly.
+  const snap = (r: Rect): Rect => {
+    const x = Math.round(r.x),
+      y = Math.round(r.y);
+    return {
+      x,
+      y,
+      width: Math.round(r.x + r.width) - x,
+      height: Math.round(r.y + r.height) - y,
+    };
+  };
   let guidePointer: Point | undefined;
   let dialogPointer: Point | undefined;
   // Track the initiating control as well as canvas interactions. Keyboard actions
@@ -105,16 +140,31 @@ export async function mountEditor(
   const noteDialog = document.createElement("dialog");
   noteDialog.className = "capture-dialog";
   noteDialog.innerHTML =
-    '<form method="dialog"><h2>Not ekle</h2><textarea aria-label="Not metni" placeholder="Notunuzu yazın…" rows="4" maxlength="2000"></textarea><div><button value="cancel">Vazgeç</button><button value="add" class="upload-confirm">Notu ekle</button></div></form>';
+    `<form method="dialog"><h2>${t("annotation.addTitle")}</h2><textarea aria-label="${t("editor.noteLabel")}" placeholder="${t("editor.notePlaceholder")}" rows="4" maxlength="2000"></textarea><div><button value="cancel">${t("editor.cancel")}</button><button value="add" class="upload-confirm">${t("annotation.addConfirm")}</button></div></form>`;
   root.append(noteDialog);
-  async function addText(p: Point) {
+  noteDialog
+    .querySelector<HTMLTextAreaElement>("textarea")!
+    .addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        noteDialog.close("add");
+      }
+    });
+  async function addText(p: Point, existing?: Stroke) {
     const token = generation;
+    const area = noteDialog.querySelector<HTMLTextAreaElement>("textarea")!;
     noteDialog.returnValue = "cancel";
-    noteDialog.querySelector<HTMLTextAreaElement>("textarea")!.value = "";
+    area.value = existing?.text ?? "";
+    noteDialog.querySelector("h2")!.textContent = existing
+      ? ANNOTATION_TEXT.editNoteTitle
+      : ANNOTATION_TEXT.addNoteTitle;
+    noteDialog.querySelector(".upload-confirm")!.textContent = existing
+      ? ANNOTATION_TEXT.editNoteConfirm
+      : ANNOTATION_TEXT.addNoteConfirm;
     dialogPointer = p;
     noteDialog.showModal();
     layoutOverlays();
-    noteDialog.querySelector<HTMLTextAreaElement>("textarea")!.focus();
+    area.focus();
     const result = await new Promise<string>((resolve) =>
       noteDialog.addEventListener(
         "close",
@@ -122,25 +172,41 @@ export async function mountEditor(
         { once: true },
       ),
     );
-    const value =
-      noteDialog.querySelector<HTMLTextAreaElement>("textarea")!.value;
+    const value = area.value;
     if (token === generation && result === "add" && value.trim()) {
-      strokes.push({ tool: "text", points: [p], color, width, text: value });
-      redo = [];
+      if (existing) {
+        const i = hist.strokes.indexOf(existing);
+        if (i >= 0 && value !== existing.text) {
+          const next = { ...existing, text: value };
+          hist.replace(i, next);
+          selected = next;
+        }
+      } else
+        hist.add({
+          tool: "text",
+          points: [p],
+          color,
+          width,
+          text: value,
+          scale: capture?.scaleFactor || 1,
+        });
       schedule();
     }
   }
-  const labels: Array<[Tool, string, string, string]> = [
-    ["select", "↖", "Seç / taşı", "V"],
-    ["pen", "✎", "Kalem", "P"],
-    ["highlight", "▰", "Vurgula", "H"],
-    ["arrow", "↗", "Ok", "A"],
-    ["rectangle", "□", "Dikdörtgen", "R"],
-    ["ellipse", "○", "Elips", "O"],
-    ["text", "T", "Not ekle", "T"],
-    ["marker", "①", "Numara", "N"],
-    ["pixelate", "▦", "Pikselleştir", "B"],
+  const toolLabels = (): Array<[Tool, string, string, string]> => [
+    ["select", "↖", t("editor.tool.select"), "V"],
+    ["pen", "✎", t("editor.tool.pen"), "P"],
+    ["highlight", "▰", t("editor.tool.highlight"), "H"],
+    ["arrow", "↗", t("editor.tool.arrow"), "A"],
+    ["rectangle", "□", t("editor.tool.rectangle"), "R"],
+    ["ellipse", "○", t("editor.tool.ellipse"), "O"],
+    ["text", "T", t("editor.tool.text"), "T"],
+    ["marker", "①", t("editor.tool.marker"), "N"],
+    ["pixelate", "▦", t("editor.tool.pixelate"), "B"],
   ];
+  const labels = toolLabels();
+  const toolByCode = (code: string) =>
+    labels.find((t) => code === "Key" + t[3]);
   const button = (label: string, title: string, fn: () => void) => {
     const b = document.createElement("button");
     b.type = "button";
@@ -152,11 +218,27 @@ export async function mountEditor(
   };
   const setTool = (next: Tool) => {
     tool = next;
+    if (next !== "select") selected = null;
     tools.querySelectorAll<HTMLButtonElement>("[data-tool]").forEach((b) => {
       b.setAttribute("aria-pressed", String(b.dataset.tool === tool));
     });
-    canvas.style.cursor = tool === "select" ? "crosshair" : "crosshair";
+    canvas.style.cursor = "crosshair";
   };
+  const hitThreshold = () => (12 * canvas.width) / displayRect().width;
+  function updateCursor(p: Point) {
+    if (!selection || tool !== "select") {
+      canvas.style.cursor = "crosshair";
+      return;
+    }
+    const h = hitHandle(selection, p, hitThreshold());
+    if (!h && inside(p, selection) && strokeAt(p) >= 0) {
+      canvas.style.cursor = "move";
+      return;
+    }
+    canvas.style.cursor = handleCursor(
+      h ?? (inside(p, selection) ? "move" : null),
+    );
+  }
   const toolIcons: Record<Tool, IconNode> = {
     select: MousePointer2,
     pen: Pencil,
@@ -187,49 +269,57 @@ export async function mountEditor(
   const colorInput = document.createElement("input");
   colorInput.type = "color";
   colorInput.value = color;
-  colorInput.title = "Çizim rengi";
-  colorInput.setAttribute("aria-label", "Çizim rengi");
+  colorInput.title = t("editor.color");
+  colorInput.setAttribute("aria-label", t("editor.color"));
   colorInput.oninput = () => (color = colorInput.value);
+  colorInput.onchange = () => colorInput.blur();
   tools.append(colorInput);
   const widthInput = document.createElement("input");
   widthInput.type = "range";
   widthInput.min = "1";
   widthInput.max = "12";
   widthInput.value = String(width);
-  widthInput.title = "Çizgi kalınlığı";
-  widthInput.setAttribute("aria-label", "Çizgi kalınlığı");
+  widthInput.title = t("editor.width");
+  widthInput.setAttribute("aria-label", t("editor.width"));
   widthInput.oninput = () => (width = Number(widthInput.value));
+  widthInput.onchange = () => widthInput.blur();
   tools.append(widthInput);
-  const undoButton = button("↶", "Geri al (Ctrl/Cmd+Z)", () => undo()),
-    redoButton = button("↷", "Yinele (Ctrl/Cmd+Shift+Z)", () => redoStroke());
+  const undoButton = button("↶", t("editor.undo"), () => undo()),
+    redoButton = button("↷", t("editor.redo"), () => redoStroke());
   tools.append(undoButton, redoButton);
   setIcon(undoButton, Undo2);
   setIcon(redoButton, Redo2);
   const copyButton = button(
-      "Kopyala",
-      "Panoya kopyala (Ctrl/Cmd+C)",
+      t("editor.copy"),
+      t("editor.copyTitle"),
       () => void execute("copy"),
     ),
     saveButton = button(
-      "Kaydet",
-      "Dosyaya kaydet (Ctrl/Cmd+S)",
+      t("editor.save"),
+      t("editor.saveTitle"),
       () => void execute("save"),
     ),
     uploadButton = button(
-      "↑ Paylaş",
-      "Bağlantıyla paylaş",
+      t("editor.share"),
+      t("editor.shareButtonTitle"),
       () => void requestUpload(),
     );
+  const newAreaButton = button(
+      t("editor.newArea"),
+      t("editor.newAreaTitle"),
+      () => {
+        selection = null;
+        setTool("select");
+        schedule();
+      },
+    ),
+    closeButton = button("×", t("editor.closeTitle"), () => void close());
   actions.append(
-    button("Yeni alan", "Alanı yeniden seç", () => {
-      selection = null;
-      setTool("select");
-      schedule();
-    }),
+    newAreaButton,
     copyButton,
     saveButton,
     uploadButton,
-    button("×", "Vazgeç (Esc)", () => void close()),
+    closeButton,
   );
   copyButton.classList.add("primary");
   [Crop, Copy, Save, Upload, X].forEach((icon, index) => {
@@ -242,8 +332,29 @@ export async function mountEditor(
       b.append(span);
     }
   });
-  function show(message: string) {
+  function show(
+    message: string,
+    opts: { error?: boolean; link?: string } = {},
+  ) {
+    clearTimeout(toastTimer);
     toast.textContent = message;
+    if (opts.link) {
+      const link = opts.link;
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = t("editor.copy");
+      b.onclick = () => {
+        navigator.clipboard.writeText(link).then(
+          () => (b.textContent = t("editor.copied")),
+          () => (b.textContent = t("editor.copyFailed")),
+        );
+      };
+      toast.append(b);
+    } else if (!opts.error) {
+      toastTimer = setTimeout(() => {
+        toast.hidden = true;
+      }, 4000);
+    }
     toast.hidden = false;
     layoutOverlays();
   }
@@ -294,19 +405,25 @@ export async function mountEditor(
       panel.style.insetBlockStart = p.y + "px";
     }
   }
+  /** Strokes as shown: the dragged annotation is swapped for its preview. */
+  function viewStrokes(): Stroke[] {
+    if (!preview || !drag?.stroke) return hist.strokes;
+    return hist.strokes.map((s) => (s === drag!.stroke ? preview! : s));
+  }
   function rebuild() {
     if (!capture) return;
+    const view = viewStrokes();
     if (
       cachedCapture === capture &&
-      cachedStrokes.length === strokes.length &&
-      cachedStrokes.every((s, i) => s === strokes[i])
+      cachedStrokes.length === view.length &&
+      cachedStrokes.every((s, i) => s === view[i])
     )
       return;
     composedCtx.clearRect(0, 0, composed.width, composed.height);
     composedCtx.drawImage(image, 0, 0, composed.width, composed.height);
-    strokes.forEach((s) => paintStroke(composedCtx, s));
+    view.forEach((s) => paintStroke(composedCtx, s));
     cachedCapture = capture;
-    cachedStrokes = [...strokes];
+    cachedStrokes = [...view];
   }
   function setLocked() {
     tools
@@ -315,8 +432,8 @@ export async function mountEditor(
     actions
       .querySelectorAll<HTMLButtonElement>("button")
       .forEach((el) => (el.disabled = busy || loading));
-    undoButton.disabled = busy || loading || !strokes.length;
-    redoButton.disabled = busy || loading || !redo.length;
+    undoButton.disabled = busy || loading || !hist.canUndo;
+    redoButton.disabled = busy || loading || !hist.canRedo;
   }
   function layoutPanels() {
     if (!selection) return;
@@ -396,23 +513,36 @@ export async function mountEditor(
       ctx.strokeRect(r.x, r.y, r.width, r.height);
       ctx.setLineDash([]);
       ctx.fillStyle = "#fff";
-      [
-        [r.x, r.y],
-        [r.x + r.width, r.y],
-        [r.x, r.y + r.height],
-        [r.x + r.width, r.y + r.height],
-      ].forEach(([x, y]) =>
+      selectionHandles(r).forEach(({ x, y }) =>
         ctx.fillRect(x - 3 * scale, y - 3 * scale, 6 * scale, 6 * scale),
       );
       dimensions.textContent =
         Math.round(r.width) + " × " + Math.round(r.height) + " px";
+    }
+    const shown = selected && (preview ?? selected);
+    const bounds = shown && strokeBounds(shown, measure);
+    if (bounds) {
+      const sc = canvas.width / displayRect().width;
+      ctx.strokeStyle = "#4da3ff";
+      ctx.lineWidth = 1.5 * sc;
+      ctx.setLineDash([6 * sc, 4 * sc]);
+      const pad = 3 * sc;
+      ctx.strokeRect(
+        bounds.x - pad,
+        bounds.y - pad,
+        bounds.width + pad * 2,
+        bounds.height + pad * 2,
+      );
+      ctx.setLineDash([]);
     }
     ctx.restore();
     displayCtx.drawImage(frameCanvas, 0, 0);
     guide.hidden = !!selection;
     tools.hidden = actions.hidden = dimensions.hidden = !selection;
     if (!selection) layoutGuide();
-    dock.hidden = !selection || !!(drag && drag.kind !== "draw");
+    dock.hidden =
+      !selection ||
+      !!(drag && drag.kind !== "draw" && drag.kind !== "annotation");
     setLocked();
     if (selection) layoutPanels();
     layoutOverlays();
@@ -421,14 +551,23 @@ export async function mountEditor(
     if (!frame) frame = requestAnimationFrame(render);
   }
   function undo() {
-    const s = strokes.pop();
-    if (s) redo.push(s);
+    if (hist.undo()) syncSelected();
     schedule();
   }
   function redoStroke() {
-    const s = redo.pop();
-    if (s) strokes.push(s);
+    if (hist.redo()) syncSelected();
     schedule();
+  }
+  function syncSelected() {
+    if (selected && !hist.strokes.includes(selected)) selected = null;
+  }
+  const measureCtx = document.createElement("canvas").getContext("2d")!;
+  const measure: TextMeasure = (text, font) => {
+    measureCtx.font = font;
+    return measureCtx.measureText(text).width;
+  };
+  function strokeAt(p: Point): number {
+    return hitTopmost(hist.strokes, p, hitThreshold() / 2, measure);
   }
   function inside(p: Point, r: Rect) {
     return (
@@ -441,6 +580,7 @@ export async function mountEditor(
     const p = point(e);
     toast.hidden = true;
     if (selection && tool !== "select" && inside(p, selection)) {
+      selected = null;
       if (tool === "text") {
         // The dialog opens during pointerdown. Prevent the original canvas
         // gesture's default focus step from stealing focus back from its input.
@@ -454,29 +594,30 @@ export async function mountEditor(
         points: [p],
         color,
         width,
-        number: strokes.filter((s) => s.tool === "marker").length + 1,
+        number: hist.strokes.filter((s) => s.tool === "marker").length + 1,
+        scale: capture.scaleFactor || 1,
       };
       drag = { kind: "draw", start: p };
     } else if (selection && tool === "select") {
       const r = selection,
-        threshold = (12 * canvas.width) / displayRect().width;
-      const corners = [
-        { x: r.x, y: r.y },
-        { x: r.x + r.width, y: r.y },
-        { x: r.x, y: r.y + r.height },
-        { x: r.x + r.width, y: r.y + r.height },
-      ];
-      const corner = corners.findIndex(
-        (c) => Math.hypot(c.x - p.x, c.y - p.y) < threshold,
-      );
-      if (corner >= 0)
-        drag = { kind: "resize", start: p, anchor: corners[3 - corner] };
-      else if (inside(p, r)) drag = { kind: "move", start: p, rect: { ...r } };
-      else {
+        handle = hitHandle(r, p, hitThreshold()),
+        hit = handle || !inside(p, r) ? -1 : strokeAt(p);
+      if (handle) {
+        selected = null;
+        drag = { kind: "resize", start: p, rect: { ...r }, handle };
+      } else if (hit >= 0) {
+        selected = hist.strokes[hit];
+        drag = { kind: "annotation", start: p, stroke: selected };
+      } else if (inside(p, r)) {
+        selected = null;
+        drag = { kind: "move", start: p, rect: { ...r } };
+      } else {
+        selected = null;
         selection = null;
         drag = { kind: "select", start: p };
       }
     } else {
+      selected = null;
       selection = null;
       drag = { kind: "select", start: p };
     }
@@ -486,17 +627,28 @@ export async function mountEditor(
     const p = point(e);
     guidePointer = p;
     if (!selection) layoutGuide();
-    if (!drag) return;
-    if (drag.kind === "select") selection = rectBetween(drag.start, p);
-    else if (drag.kind === "resize") selection = rectBetween(drag.anchor!, p);
+    if (!drag) {
+      updateCursor(p);
+      return;
+    }
+    if (drag.kind === "select") selection = snap(rectBetween(drag.start, p));
+    else if (drag.kind === "resize")
+      selection = snap(resizeByHandle(drag.rect!, drag.handle!, p));
     else if (drag.kind === "move")
-      selection = moveRect(
-        drag.rect!,
-        { x: p.x - drag.start.x, y: p.y - drag.start.y },
-        canvas.width,
-        canvas.height,
+      selection = snap(
+        moveRect(
+          drag.rect!,
+          { x: p.x - drag.start.x, y: p.y - drag.start.y },
+          canvas.width,
+          canvas.height,
+        ),
       );
-    else if (active) {
+    else if (drag.kind === "annotation") {
+      preview = translateStroke(drag.stroke!, {
+        x: p.x - drag.start.x,
+        y: p.y - drag.start.y,
+      });
+    } else if (active) {
       if (active.tool === "pen" || active.tool === "highlight")
         active.points.push(p);
       else active.points = [drag.start, p];
@@ -505,10 +657,20 @@ export async function mountEditor(
   };
   const end = () => {
     if (active) {
-      strokes.push(active);
+      if (!isDegenerateStroke(active)) hist.add(active);
       active = null;
-      redo = [];
     }
+    if (drag?.kind === "annotation" && preview) {
+      // One history entry per drag, committed on release.
+      const i = hist.strokes.indexOf(drag.stroke!);
+      const moved = preview.points[0].x !== drag.stroke!.points[0].x ||
+        preview.points[0].y !== drag.stroke!.points[0].y;
+      if (i >= 0 && moved) {
+        hist.replace(i, preview);
+        selected = preview;
+      }
+    }
+    preview = null;
     drag = null;
     if (selection && (selection.width < 3 || selection.height < 3))
       selection = null;
@@ -517,15 +679,25 @@ export async function mountEditor(
   canvas.onpointerup = end;
   canvas.onpointercancel = () => {
     active = null;
+    preview = null;
     drag = null;
     schedule();
+  };
+  canvas.ondblclick = (e) => {
+    if (busy || loading || !capture || tool !== "select" || !selection) return;
+    const i = strokeAt(point(e as PointerEvent));
+    const s = hist.strokes[i];
+    if (s?.tool === "text") {
+      selected = s;
+      void addText(s.points[0], s);
+    }
   };
   async function close(nativeClose = true) {
     const id = capture?.id;
     const token = ++generation;
     selection = null;
-    strokes = [];
-    redo = [];
+    hist.reset();
+    selected = null;
     active = null;
     drag = null;
     if (noteDialog.open) noteDialog.close("cancel");
@@ -542,13 +714,13 @@ export async function mountEditor(
     canvas.height = frameCanvas.height = composed.height = 1;
     if (demo)
       container.innerHTML =
-        '<div class="capture-demo-ended">Demo tamamlandı. Yeniden denemek için sayfayı yenileyin.</div>';
+        `<div class="capture-demo-ended">${t("editor.demoEnded")}</div>`;
   }
   async function exported(useFileFormat = false) {
-    if (!selection || !capture) throw new Error("Önce bir alan seçin.");
+    if (!selection || !capture) throw new Error(t("editor.selectAreaFirst"));
     rebuild();
     const r = cropBounds(selection, canvas.width, canvas.height);
-    if (!r.width || !r.height) throw new Error("Geçerli bir alan seçin.");
+    if (!r.width || !r.height) throw new Error(t("editor.invalidArea"));
     const out = document.createElement("canvas");
     out.width = r.width;
     out.height = r.height;
@@ -614,18 +786,25 @@ export async function mountEditor(
         }
       } else {
         if (demo)
-          throw new Error(
-            "Yükleme masaüstü uygulamasında kullanılabilir. Demo görüntüsü internete gönderilmedi.",
-          );
-        show("Görüntü yükleniyor…");
-        const url = await api.upload(dataUrl);
+          throw new Error(t("editor.uploadDemo"));
+        show(t("editor.uploading"), { error: true });
+        // bridge.ts will resolve to {url, copied, closed}; cast until it lands.
+        const info = await api.upload(dataUrl);
         if (token !== generation) return;
-        show(`Paylaşım bağlantısı: ${url}`);
-        if (settings.closeAfterUpload) await close(false);
+        // Native side already closed the editor when closed is true.
+        if (!info.closed)
+          show(
+            t(info.copied ? "editor.linkReadyCopied" : "editor.linkReady", {
+              url: info.url,
+            }),
+            { link: info.url },
+          );
       }
     } catch (error) {
       if (token === generation)
-        show(error instanceof Error ? error.message : String(error));
+        show(error instanceof Error ? error.message : String(error), {
+          error: true,
+        });
     } finally {
       busy = false;
       setLocked();
@@ -636,27 +815,16 @@ export async function mountEditor(
     if (busy || loading || !selection) return;
     const token = generation;
     if (demo) {
-      show(
-        "Bağlantıyla paylaşım masaüstü uygulamasında kullanılabilir. Demo görüntüsü internete gönderilmedi.",
-      );
-      return;
-    }
-    if (settings.uploadProvider === "lightshot") {
-      show(
-        "prnt.sc doğrudan yükleme bu sürümde kullanılamıyor. Ayarlar → Yükleme ve vekil sunucu bölümünde özel bir yükleme servisi ayarlayın veya görüntüyü kopyalayın.",
-      );
+      show(t("editor.shareDemo"), { error: true });
       return;
     }
     if (!settings.uploadEndpoint) {
-      show(
-        "Önce Ayarlar → Yükleme ve vekil sunucu bölümünde bir yükleme servisi adresi ekleyin.",
-      );
+      show(t("editor.noEndpoint"), { error: true });
       return;
     }
-    dialog.querySelector("p")!.textContent =
-      "Görüntü ayarladığınız yükleme servisine gönderilecek: " +
-      settings.uploadEndpoint +
-      ". Oluşturulan bağlantıya erişebilen kişiler görüntüyü görebilir. Hassas bilgileri gizlediğinizden emin olun.";
+    dialog.querySelector("p")!.textContent = t("editor.shareBody", {
+      endpoint: settings.uploadEndpoint,
+    });
     dialog.returnValue = "cancel";
     dialogPointer = guidePointer;
     dialog.showModal();
@@ -670,20 +838,36 @@ export async function mountEditor(
   }
   function key(e: KeyboardEvent) {
     if (busy || loading) {
-      e.preventDefault();
+      if (e.key === "Escape" && !dialog.open && !noteDialog.open) {
+        e.preventDefault();
+        void close();
+      } else if (!dialog.open && !noteDialog.open) e.preventDefault();
       return;
     }
-    if (
-      e.target instanceof HTMLInputElement ||
-      e.target instanceof HTMLTextAreaElement ||
-      dialog.open ||
-      noteDialog.open
-    )
-      return;
+    const t = e.target;
+    const textual =
+      t instanceof HTMLTextAreaElement ||
+      t instanceof HTMLSelectElement ||
+      (t instanceof HTMLInputElement &&
+        !["color", "range", "checkbox", "radio", "button"].includes(t.type));
+    if (textual || dialog.open || noteDialog.open) return;
     const mod = e.ctrlKey || e.metaKey;
     if (e.key === "Escape") {
       e.preventDefault();
-      if (!busy) void close();
+      if (selected && !drag) {
+        selected = null;
+        schedule();
+      } else void close();
+    } else if (
+      (e.key === "Delete" || e.key === "Backspace") &&
+      selected &&
+      !drag
+    ) {
+      e.preventDefault();
+      const i = hist.strokes.indexOf(selected);
+      selected = null;
+      hist.remove(i);
+      schedule();
     } else if (mod && e.key.toLowerCase() === "z") {
       e.preventDefault();
       if (e.shiftKey) redoStroke();
@@ -695,9 +879,7 @@ export async function mountEditor(
       e.preventDefault();
       void execute(e.key.toLowerCase() === "s" ? "save" : "copy");
     } else if (!mod) {
-      const entry = labels.find(
-        (t) => t[3].toLowerCase() === e.key.toLowerCase(),
-      );
+      const entry = toolByCode(e.code);
       if (entry) {
         e.preventDefault();
         setTool(entry[0]);
@@ -711,9 +893,74 @@ export async function mountEditor(
     panelObserver.observe(panel),
   );
   setTool("select");
+  let guideKey: "editor.guideSelect" | "editor.waiting" = "editor.guideSelect";
+  function setGuide(key: typeof guideKey) {
+    guideKey = key;
+    guide.querySelector("span")!.textContent = t(key);
+  }
+  // Re-apply the current language to every static label without touching DOM
+  // structure or editor state (the capture webview is reused across languages).
+  function applyLabels() {
+    const setTitle = (el: HTMLElement, text: string) => {
+      el.title = text;
+      el.setAttribute("aria-label", text);
+    };
+    root.setAttribute("aria-label", t("editor.label"));
+    canvas.setAttribute("aria-label", t("editor.canvasLabel"));
+    tools.setAttribute("aria-label", t("editor.toolsLabel"));
+    actions.setAttribute("aria-label", t("editor.actionsLabel"));
+    const guideSpans = guide.querySelectorAll("span");
+    guideSpans[0].textContent = t(guideKey);
+    if (guideSpans[1]) guideSpans[1].textContent = t("editor.cancel");
+    toolLabels().forEach(([name, , title, key]) => {
+      const b = tools.querySelector<HTMLElement>(`[data-tool="${name}"]`);
+      if (b) setTitle(b, `${title} (${key})`);
+    });
+    setTitle(colorInput, t("editor.color"));
+    setTitle(widthInput, t("editor.width"));
+    setTitle(undoButton, t("editor.undo"));
+    setTitle(redoButton, t("editor.redo"));
+    const setAction = (b: HTMLButtonElement, text: string, title: string) => {
+      setTitle(b, title);
+      const span = b.querySelector("span");
+      if (span) span.textContent = text;
+    };
+    setAction(newAreaButton, t("editor.newArea"), t("editor.newAreaTitle"));
+    setAction(copyButton, t("editor.copy"), t("editor.copyTitle"));
+    setAction(saveButton, t("editor.save"), t("editor.saveTitle"));
+    setAction(uploadButton, t("editor.share"), t("editor.shareButtonTitle"));
+    setTitle(closeButton, t("editor.closeTitle"));
+    const buttons = (d: HTMLDialogElement) =>
+      d.querySelectorAll<HTMLButtonElement>("button");
+    if (!dialog.open) {
+      dialog.querySelector("h2")!.textContent = t("editor.shareTitle");
+      dialog.querySelector("p")!.textContent = t("editor.shareDefaultBody");
+    }
+    const share = buttons(dialog);
+    share[0].textContent = t("editor.cancel");
+    share[1].textContent = t("editor.shareConfirm");
+    if (!noteDialog.open) {
+      noteDialog.querySelector("h2")!.textContent = t("annotation.addTitle");
+      buttons(noteDialog)[1].textContent = t("annotation.addConfirm");
+    }
+    const area = noteDialog.querySelector<HTMLTextAreaElement>("textarea")!;
+    area.setAttribute("aria-label", t("editor.noteLabel"));
+    area.placeholder = t("editor.notePlaceholder");
+    buttons(noteDialog)[0].textContent = t("editor.cancel");
+  }
+  async function refreshLanguage() {
+    try {
+      setLanguage((await api.getSettings()).language);
+    } catch {
+      return;
+    }
+    applyLabels();
+  }
   async function load(action?: CaptureAction) {
     const token = ++generation;
     loading = true;
+    if (noteDialog.open) noteDialog.close("cancel");
+    if (dialog.open) dialog.close("cancel");
     let pendingId: string | undefined;
     try {
       const next = demo ? demoCapture() : await api.getCapture();
@@ -734,12 +981,11 @@ export async function mountEditor(
       guidePointer = undefined;
       image = img;
       toast.hidden = true;
-      guide.querySelector("span")!.textContent =
-        "Yakalamak istediğiniz alanı seçin";
+      setGuide("editor.guideSelect");
       canvas.width = composed.width = frameCanvas.width = next.width;
       canvas.height = composed.height = frameCanvas.height = next.height;
-      strokes = [];
-      redo = [];
+      hist.reset();
+      selected = null;
       selection = null;
       active = null;
       tool = "select";
@@ -750,6 +996,9 @@ export async function mountEditor(
         settings = defaultSettings;
       }
       if (token !== generation) return;
+      // Settings may have changed since mount; keep labels in the saved language.
+      setLanguage(settings.language);
+      applyLabels();
       if (settings.rememberRegion) {
         try {
           const r = JSON.parse(
@@ -782,11 +1031,10 @@ export async function mountEditor(
         String(error).includes("no capture") ||
         String(error).includes("Henüz ekran yakalanmadı")
       ) {
-        guide.querySelector("span")!.textContent =
-          "Yakalama kısayolu bekleniyor";
+        setGuide("editor.waiting");
       } else {
-        const message = "Ekran yakalanamadı: " + String(error);
-        show(message);
+        const message = t("editor.captureFailed", { error: String(error) });
+        show(message, { error: true });
         if (native && pendingId)
           await api.abort(pendingId, message).catch(() => {});
       }
@@ -797,10 +1045,12 @@ export async function mountEditor(
       }
     }
   }
-  if (native)
+  if (native) {
     await listen<{ action: CaptureAction }>("capture-ready", (e) => {
       void load(e.payload.action);
     });
+    await listen("settings-changed", () => void refreshLanguage());
+  }
   // Persist the rectangle in screenshot pixel coordinates only after a real selection.
   canvas.addEventListener("pointerup", () => {
     if (settings.rememberRegion && selection)
@@ -823,27 +1073,23 @@ function demoCapture(): Capture {
   x.fillRect(120, 100, 1360, 54);
   x.font = "16px sans-serif";
   x.fillStyle = "#cad7e7";
-  x.fillText(
-    "byshoot   /   Örnek çalışma alanı — bu gerçek ekran görüntünüz değildir",
-    160,
-    133,
-  );
+  x.fillText(t("editor.demoTitle"), 160, 133);
   x.fillStyle = "#edf2f8";
   x.fillRect(120, 154, 240, 736);
   x.fillStyle = "#64778d";
   [
-    "Çalışma alanı",
-    "Genel bakış",
-    "Dosyalar",
-    "Paylaşımlar",
-    "Ayarlar",
+    t("editor.demoNav1"),
+    t("editor.demoNav2"),
+    t("editor.demoNav3"),
+    t("editor.demoNav4"),
+    t("editor.demoNav5"),
   ].forEach((s, i) => x.fillText(s, 150, 212 + i * 52));
   x.fillStyle = "#172638";
   x.font = "bold 40px sans-serif";
-  x.fillText("Fikri göster. Birlikte netleştir.", 420, 240);
+  x.fillText(t("editor.demoHeadline"), 420, 240);
   x.font = "20px sans-serif";
   x.fillStyle = "#687d94";
-  x.fillText("Alan seçin; oklar, şekiller ve notlarla anlatın.", 420, 284);
+  x.fillText(t("editor.demoSub"), 420, 284);
   x.fillStyle = "#e1e9f2";
   x.fillRect(420, 340, 990, 400);
   x.fillStyle = "#fff";
@@ -869,11 +1115,7 @@ function demoCapture(): Capture {
   x.stroke();
   x.fillStyle = "#64778d";
   x.font = "18px sans-serif";
-  x.fillText(
-    "DEMO · Hassas bilgiler için pikselleştirme aracını deneyin.",
-    420,
-    810,
-  );
+  x.fillText(t("editor.demoHint"), 420, 810);
   return {
     dataUrl: c.toDataURL(),
     width: c.width,

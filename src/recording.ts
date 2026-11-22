@@ -1,5 +1,7 @@
 import "./recording.css";
+import { t } from "./i18n";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   createElement,
   Video,
@@ -18,11 +20,12 @@ interface Sources {
 }
 interface Status {
   recording: boolean;
+  paused: boolean;
   pendingPath: string | null;
   elapsedSeconds: number;
   error: string | null;
 }
-type Operation = "starting" | "stopping" | "saving" | null;
+type Operation = "starting" | "stopping" | "saving" | "pausing" | "resuming" | null;
 type Feedback = { text: string; tone: "neutral" | "success" | "error" };
 const recordingDraft = { mode: "video", monitor: "", audio: "" };
 
@@ -34,28 +37,30 @@ export function elapsedLabel(seconds: number) {
 
 export function mountRecording(container: HTMLElement): () => void {
   container.innerHTML = `<section class="recording-view" aria-labelledby="recording-heading">
-  <header class="recording-heading"><h1 id="recording-heading">Ses ve video kaydı</h1><p>Ekranınızı ya da yalnızca sesi dosyaya kaydedin.</p></header>
-  <fieldset class="recording-mode"><legend class="sr-only">Kayıt türü</legend>
-   <label><input type="radio" name="recording-mode" value="video" checked><span data-icon="video"></span><span>Ekran videosu</span><small>MP4</small></label>
-   <label><input type="radio" name="recording-mode" value="audio"><span data-icon="mic"></span><span>Yalnız ses</span><small>WAV</small></label>
+  <header class="recording-heading"><h1 id="recording-heading">${t("rec.title")}</h1><p>${t("rec.subtitle")}</p></header>
+  <fieldset class="recording-mode"><legend class="sr-only">${t("rec.modeLabel")}</legend>
+   <label><input type="radio" name="recording-mode" value="video" checked><span data-icon="video"></span><span>${t("rec.modeVideo")}</span><small>MP4</small></label>
+   <label><input type="radio" name="recording-mode" value="audio"><span data-icon="mic"></span><span>${t("rec.modeAudio")}</span><small>WAV</small></label>
   </fieldset>
   <div class="recording-fields">
-   <label data-screen-label><span class="recording-field-label"><span data-icon="monitor"></span>Ekran</span><select data-screen aria-label="Kaydedilecek ekran" disabled><option value="">Ekranlar okunuyor…</option></select></label>
-   <label><span class="recording-field-label"><span data-icon="mic"></span>Ses girişi</span><select data-audio aria-describedby="recording-audio-hint" disabled><option value="">Ses olmadan</option></select></label>
+   <label data-screen-label><span class="recording-field-label"><span data-icon="monitor"></span>${t("rec.screen")}</span><select data-screen aria-label="${t("rec.screenAria")}" disabled><option value="">${t("rec.screensLoading")}</option></select></label>
+   <label data-region-label><span class="recording-field-label">${t("rec.area")}</span><select data-region><option value="full">${t("rec.areaFull")}</option><option value="selected">${t("rec.areaSelected")}</option></select><button type="button" data-pick hidden>${t("rec.pickArea")}</button><span data-region-size></span></label>
+   <label><span class="recording-field-label"><span data-icon="mic"></span>${t("rec.audioInput")}</span><select data-audio aria-describedby="recording-audio-hint" disabled><option value="">${t("rec.noAudio")}</option></select></label>
   </div>
   <p id="recording-audio-hint" class="recording-input-hint"></p>
-  <details class="recording-help"><summary>Sistem sesini nasıl kaydederim?</summary><p>Bilgisayarınızda sunulan Stereo Mix veya sanal ses kablosu girişini seçin. Yalnızca bu girişe yönlendirilen ses kaydedilir. Mikrofon seçimi yalnız o mikrofonu kaydeder.</p></details>
+  <details class="recording-help"><summary>${t("rec.helpSummary")}</summary><p>${t("rec.helpBody")}</p></details>
   <div class="recording-controls">
-   <div class="recording-state"><span class="recording-indicator" aria-hidden="true"></span><span data-state>Kayıt hazırlanıyor</span><output class="recording-clock" role="timer" aria-live="off" aria-label="Kayıt süresi">00:00</output></div>
+   <div class="recording-state"><span class="recording-indicator" aria-hidden="true"></span><span data-state>${t("rec.state.preparing")}</span><output class="recording-clock" role="timer" aria-live="off" aria-label="${t("rec.clockLabel")}">00:00</output></div>
    <div class="recording-buttons">
-    <button class="recording-primary" data-start disabled><span class="recording-button-dot" aria-hidden="true"></span><span data-start-label>Kaydı başlat</span></button>
-    <button class="recording-stop" data-stop hidden><span data-icon="square"></span><span data-stop-label>Kaydı durdur</span></button>
-    <button class="recording-primary" data-save hidden><span data-icon="download"></span><span data-save-label>Dosyaya kaydet</span></button>
-    <button class="recording-refresh" data-refresh aria-label="Ekranları ve ses girişlerini yenile"><span data-icon="refresh"></span><span data-refresh-label>Yenile</span></button>
+    <button class="recording-primary" data-start disabled><span class="recording-button-dot" aria-hidden="true"></span><span data-start-label>${t("rec.start")}</span></button>
+    <button class="recording-stop" data-stop hidden><span data-icon="square"></span><span data-stop-label>${t("rec.stop")}</span></button>
+    <button class="recording-refresh" data-pause hidden>${t("rec.pause")}</button>
+    <button class="recording-primary" data-save hidden><span data-icon="download"></span><span data-save-label>${t("rec.saveFile")}</span></button>
+    <button class="recording-refresh" data-refresh aria-label="${t("rec.refreshAria")}"><span data-icon="refresh"></span><span data-refresh-label>${t("rec.refresh")}</span></button>
    </div>
   </div>
   <p class="recording-status" role="status" aria-live="polite" aria-atomic="true"></p>
-  <details class="recording-recovery" hidden><summary>Kayıt geçici olarak korunuyor</summary><p>Kaydetmeyi iptal etseniz de bu dosya korunur.</p><code></code></details>
+  <details class="recording-recovery" hidden><summary>${t("rec.recoverySummary")}</summary><p>${t("rec.recoveryBody")}</p><code></code></details>
  </section>`;
   const root = container.querySelector<HTMLElement>(".recording-view")!;
   const icons = {
@@ -79,9 +84,15 @@ export function mountRecording(container: HTMLElement): () => void {
   for (const input of modes)
     input.checked = input.value === recordingDraft.mode;
   const screen = root.querySelector<HTMLSelectElement>("[data-screen]")!;
+  const regionMode = root.querySelector<HTMLSelectElement>("[data-region]")!;
+  const pick = root.querySelector<HTMLButtonElement>("[data-pick]")!;
+  const regionSize = root.querySelector<HTMLElement>("[data-region-size]")!;
+  let region: { x: number; y: number; width: number; height: number } | null = null;
+  let unlistenRegion: (() => void) | undefined;
   const audio = root.querySelector<HTMLSelectElement>("[data-audio]")!;
   const start = root.querySelector<HTMLButtonElement>("[data-start]")!;
   const stop = root.querySelector<HTMLButtonElement>("[data-stop]")!;
+  const pause = root.querySelector<HTMLButtonElement>("[data-pause]")!;
   const save = root.querySelector<HTMLButtonElement>("[data-save]")!;
   const refresh = root.querySelector<HTMLButtonElement>("[data-refresh]")!;
   const message = root.querySelector<HTMLElement>(".recording-status")!;
@@ -100,6 +111,7 @@ export function mountRecording(container: HTMLElement): () => void {
     feedback: Feedback | null = null;
   let status: Status = {
     recording: false,
+    paused: false,
     pendingPath: null,
     elapsedSeconds: 0,
     error: null,
@@ -125,60 +137,68 @@ export function mountRecording(container: HTMLElement): () => void {
     screen.disabled = audio.disabled =
       locked || loadingSources || !sources?.available;
     root.querySelector<HTMLElement>("[data-screen-label]")!.hidden = audioOnly;
+    root.querySelector<HTMLElement>("[data-region-label]")!.hidden = audioOnly;
+    regionMode.disabled = locked || loadingSources || !sources?.available;
+    pick.hidden = regionMode.value !== "selected";
+    pick.disabled = regionMode.disabled;
+    regionSize.textContent = region ? `${Math.round(region.width)} × ${Math.round(region.height)}` : "";
     start.hidden = status.recording || pending;
     start.disabled =
       !!operation ||
       loadingSources ||
       !statusReady ||
       !sources?.available ||
-      (audioOnly ? !audio.value : !screen.value);
+      (audioOnly ? !audio.value : !screen.value || (regionMode.value === "selected" && !region));
     stop.hidden = !status.recording;
     stop.disabled = !!operation;
+    pause.hidden = !status.recording;
+    pause.disabled = !!operation;
+    pause.textContent = operation === "pausing" ? t("rec.pausing") : operation === "resuming" ? t("rec.resuming") : status.paused ? t("rec.resume") : t("rec.pause");
     save.hidden = !pending;
     save.disabled = !!operation;
     refresh.disabled =
       !native || !!operation || loadingSources || status.recording;
     root.querySelector("[data-start-label]")!.textContent =
-      operation === "starting" ? "Başlatılıyor…" : "Kaydı başlat";
+      operation === "starting" ? t("rec.starting") : t("rec.start");
     root.querySelector("[data-stop-label]")!.textContent =
-      operation === "stopping" ? "Durduruluyor…" : "Kaydı durdur";
+      operation === "stopping" ? t("rec.stopping") : t("rec.stop");
     root.querySelector("[data-save-label]")!.textContent =
-      operation === "saving" ? "Kaydediliyor…" : "Dosyaya kaydet";
+      operation === "saving" ? t("rec.savingFile") : t("rec.saveFile");
     root.querySelector("[data-refresh-label]")!.textContent = loadingSources
-      ? "Okunuyor…"
-      : "Yenile";
+      ? t("rec.refreshing")
+      : t("rec.refresh");
     stateLabel.textContent =
       operation === "starting"
-        ? "Kayıt başlatılıyor"
+        ? t("rec.state.starting")
         : operation === "stopping"
-          ? "Kayıt tamamlanıyor"
+          ? t("rec.state.stopping")
           : operation === "saving"
-            ? "Dosya kaydediliyor"
+            ? t("rec.state.saving")
             : status.recording
-              ? "Kayıt sürüyor"
+              ? status.paused ? t("rec.state.paused") : t("rec.state.recording")
               : pending
-                ? "Kaydedilmeyi bekliyor"
+                ? t("rec.state.pending")
                 : !native
-                  ? "Masaüstü uygulamasında kullanılabilir"
+                  ? t("rec.state.desktopOnly")
                   : !statusReady || loadingSources
-                    ? "Kayıt hazırlanıyor"
+                    ? t("rec.state.preparing")
                     : !sources?.available
-                      ? "Kayıt kullanılamıyor"
-                      : "Kayda hazır";
+                      ? t("rec.state.unavailable")
+                      : t("rec.state.ready");
     clock.textContent = elapsedLabel(status.elapsedSeconds);
     clock.hidden =
       pending || operation === "saving" || operation === "starting";
     const noInputs = !!sources && !sources.audioDevices.length;
     inputHint.textContent = loadingSources
-      ? "Ses girişleri kontrol ediliyor…"
+      ? t("rec.hint.checking")
       : audioOnly && !audio.value
         ? noInputs
-          ? "Ses girişi bulunamadı. Mikrofonunuzu bağlayıp Yenile’ye basın."
-          : "Kaydı başlatmak için bir ses girişi seçin."
+          ? t("rec.hint.noInputs")
+          : t("rec.hint.pickInput")
         : !audio.value
-          ? "Video sessiz kaydedilir."
+          ? t("rec.hint.silent")
           : status.recording
-            ? "Seçtiğiniz ses girişi kaydediliyor."
+            ? t("rec.hint.recordingInput")
             : "";
     inputHint.hidden = !inputHint.textContent;
     audio.setAttribute(
@@ -213,7 +233,7 @@ export function mountRecording(container: HTMLElement): () => void {
       if (next.error && next.error !== previousNativeError)
         say(next.error, "error");
       else if (ended && !next.error)
-        say("Kayıt durdu. Dosyaya kaydedebilirsiniz.", "success");
+        say(t("rec.stoppedSave"), "success");
       previousNativeError = next.error;
       render();
     } catch (e) {
@@ -245,9 +265,9 @@ export function mountRecording(container: HTMLElement): () => void {
             ),
         ),
       );
-      if (!next.monitors.length) screen.add(new Option("Ekran bulunamadı", ""));
+      if (!next.monitors.length) screen.add(new Option(t("rec.noScreens"), ""));
       audio.replaceChildren(
-        new Option("Ses olmadan", ""),
+        new Option(t("rec.noAudio"), ""),
         ...next.audioDevices.map((d) => new Option(d, d)),
       );
       if (next.monitors.some((m) => String(m.id) === previousScreen))
@@ -259,7 +279,7 @@ export function mountRecording(container: HTMLElement): () => void {
       if (next.message) say(next.message, "error");
       else if (!next.monitors.length && mode() === "video")
         say(
-          "Ekran bulunamadı. Bağlantıyı kontrol edip Yenile’ye basın.",
+          t("rec.noScreensRefresh"),
           "error",
         );
       else if (!status.error) feedback = null;
@@ -312,23 +332,27 @@ export function mountRecording(container: HTMLElement): () => void {
           mode: mode(),
           monitorId: screen.value ? Number(screen.value) : null,
           audioDevice: audio.value || null,
+          region: mode() === "video" && regionMode.value === "selected" ? region : null,
         },
       });
-      if (!disposed) say("Kayıt başladı. Bu pencereyi küçültebilirsiniz.");
+      if (!disposed) say(t("rec.started"));
     });
   stop.onclick = () =>
     void action("stopping", async () => {
       await invoke("stop_recording");
-      if (!disposed) say("Kayıt durdu. Dosyaya kaydedebilirsiniz.", "success");
+      if (!disposed) say(t("rec.stoppedSave"), "success");
     });
+  pause.onclick = () => void action(status.paused ? "resuming" : "pausing", async () => {
+    await invoke(status.paused ? "resume_recording" : "pause_recording");
+  });
   save.onclick = () =>
     void action("saving", async () => {
       const path = await invoke<string | null>("save_recording");
       if (!disposed)
         say(
           path
-            ? `Kaydedildi: ${path}`
-            : "Kaydetme iptal edildi. Kayıt korunuyor.",
+            ? t("rec.savedTo", { path })
+            : t("rec.saveCancelled"),
           path ? "success" : "neutral",
         );
     });
@@ -339,25 +363,33 @@ export function mountRecording(container: HTMLElement): () => void {
       feedback = null;
       render();
     };
-  audio.onchange = screen.onchange = () => {
+  audio.onchange = () => {
     recordingDraft.monitor = screen.value;
     recordingDraft.audio = audio.value;
     render();
   };
+  screen.onchange = () => { region = null; recordingDraft.monitor = screen.value; render(); };
+  regionMode.onchange = () => { region = null; render(); if (regionMode.value === "selected") pick.click(); };
+  pick.onclick = () => { void invoke("open_recording_region", { monitorId: Number(screen.value) }).catch((error) => { say(String(error), "error"); render(); }); };
   let timer: ReturnType<typeof setInterval> | undefined;
   if (native) {
+    void listen<[number, typeof region]>("recording-region", (event) => {
+      if (event.payload[0] === Number(screen.value)) region = event.payload[1];
+      render();
+    }).then((unlisten) => { if (disposed) unlisten(); else unlistenRegion = unlisten; }).catch((error) => { say(String(error), "error"); render(); });
     void sync();
     void load();
     timer = setInterval(() => {
       if (!operation) void sync();
     }, 1000);
   } else {
-    screen.replaceChildren(new Option("Masaüstü uygulamasında seçilir", ""));
-    say("Ses ve video kaydı Windows masaüstü uygulamasında kullanılabilir.");
+    screen.replaceChildren(new Option(t("rec.screenDesktopOnly"), ""));
+    say(t("rec.desktopOnlyNote"));
     render();
   }
   return () => {
     disposed = true;
+    unlistenRegion?.();
     if (timer) clearInterval(timer);
   };
 }

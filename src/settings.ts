@@ -1,7 +1,13 @@
 import type { CaptureAction, Settings } from "./contracts";
 import { native } from "./bridge";
 import "./settings.css";
-import { recordedShortcut } from "./shortcuts";
+import { setLanguage, t as tr, type I18nKey } from "./i18n";
+import {
+  recordedShortcut,
+  shortcutKey,
+  isValidShortcut,
+  isFocusNavigationKey,
+} from "./shortcuts";
 import {
   createElement,
   Plus,
@@ -12,119 +18,13 @@ import {
   type IconNode,
 } from "lucide";
 
-const copy = {
-  tr: {
-    title: "Ayarlar",
-    subtitle: "Ekran yakalama, tam istediğin gibi.",
-    general: "Genel",
-    keys: "Kısayollar",
-    file: "Dosya",
-    upload: "Yükleme ve vekil sunucu",
-    save: "Değişiklikleri kaydet",
-    cancel: "Vazgeç",
-    saved: "Ayarlar kaydedildi.",
-    saving: "Kaydediliyor…",
-    desktop:
-      "Önizleme modu · Ekran yakalama, sistem kısayolları ve başlangıç ayarları için masaüstü uygulaması gerekir.",
-    system: "Sistem",
-    startupHint: "Tepside sessizce başlar.",
-    behavior: "Yakalama davranışı",
-    autoCopyLink: "Yüklemeden sonra bağlantıyı kopyala",
-    closeAfterUpload: "Yükleme tamamlanınca düzenleyiciyi kapat",
-    notifications: "Kopyalama ve kaydetme bildirimlerini göster",
-    rememberRegion: "Son seçilen alanı hatırla",
-    showCursor: "İmleci ekran görüntüsüne ekle",
-    launchAtStartup: "Bilgisayar açıldığında başlat",
-    language: "Uygulama dili",
-    region: "Alan seç ve düzenle",
-    fullscreenSave: "Tam ekranı hemen kaydet",
-    fullscreenUpload: "Tam ekranı hemen yükle",
-    keyHint:
-      "Aynı işlem için birden fazla kısayol ekleyebilirsin. Bir kısayolu kaldırmak için × düğmesine bas. Liste boşsa işlem için kısayol kapalıdır.",
-    add: "Kısayol ekle",
-    record: "Tuşlara bas… (Esc: iptal)",
-    disabled: "Kısayol atanmadı",
-    duplicate: "Bu kısayol başka bir işleme atanmış.",
-    format: "Görüntü biçimi",
-    quality: "JPEG kalitesi",
-    directory: "Varsayılan kayıt klasörü",
-    directoryHint: "Boş bırakılırsa her kayıtta konum seçilir.",
-    provider: "Yükleme hizmeti",
-    endpoint: "Özel HTTPS yükleme adresi",
-    proxy: "Vekil sunucu (isteğe bağlı)",
-    proxyHint:
-      "Örnek: http://sunucu:8080. Bu sürümde kullanıcı adı/parola içeren vekil sunucular desteklenmiyor.",
-    disclosure:
-      "Yüklenen ekran görüntüleri herkese açık bir bağlantı oluşturur. Hassas bilgileri önce gizle. Tam ekran yükleme kısayolu, tüm ekran için paylaşım onayını açar; varsayılan olarak kapalıdır.",
-    endpointError:
-      "Özel yükleme adresi geçerli bir HTTPS adresi olmalı; kullanıcı adı/parola içermemeli.",
-    proxyError:
-      "Kullanıcı adı/parola içermeyen geçerli bir HTTP veya HTTPS vekil sunucu adresi gir.",
-    reset: "Değişiklikler geri alındı.",
-    lightshot: "Lightshot · prnt.sc (bu sürümde kullanılamıyor)",
-    custom: "Özel sunucu",
-    nativeOnly: "Masaüstü uygulamasında kullanılabilir",
-    fileHint:
-      "PNG keskin metinler için uygundur. JPEG daha küçük dosya üretir.",
-    enabled: "Etkin",
-    failed: "Ayarlar kaydedilemedi. ",
-  },
-  en: {
-    title: "Settings",
-    subtitle: "Screen capture, your way.",
-    general: "General",
-    keys: "Shortcuts",
-    file: "Files",
-    upload: "Upload and proxy",
-    save: "Save changes",
-    cancel: "Cancel",
-    saved: "Settings saved.",
-    saving: "Saving…",
-    desktop:
-      "Preview mode · Screen capture, global shortcuts and startup settings require the desktop app.",
-    system: "System",
-    startupHint: "Starts quietly in the tray.",
-    behavior: "Capture behavior",
-    autoCopyLink: "Copy the link after upload",
-    closeAfterUpload: "Close the editor after upload",
-    notifications: "Show copy and save notifications",
-    rememberRegion: "Remember the last selected area",
-    showCursor: "Include the cursor in screenshots",
-    launchAtStartup: "Launch at computer startup",
-    language: "App language",
-    region: "Select an area and annotate",
-    fullscreenSave: "Save full screen immediately",
-    fullscreenUpload: "Upload full screen immediately",
-    keyHint:
-      "Add several shortcuts for the same action. Press × to remove one. An empty list disables shortcuts for that action.",
-    add: "Add shortcut",
-    record: "Press keys… (Esc: cancel)",
-    disabled: "No shortcut assigned",
-    duplicate: "This shortcut is already assigned to another action.",
-    format: "Image format",
-    quality: "JPEG quality",
-    directory: "Default save folder",
-    directoryHint: "Leave empty to choose a location each time.",
-    provider: "Upload service",
-    endpoint: "Custom HTTPS upload URL",
-    proxy: "Proxy server (optional)",
-    proxyHint:
-      "Example: http://server:8080. Proxy authentication is not supported in this version.",
-    disclosure:
-      "Uploaded screenshots create a public link. Hide sensitive information first. A full-screen upload shortcut opens confirmation for sharing the entire screen; it is disabled by default.",
-    endpointError:
-      "Enter a valid HTTPS upload URL without a username or password.",
-    proxyError:
-      "Enter a valid HTTP or HTTPS proxy URL without a username or password.",
-    reset: "Changes discarded.",
-    lightshot: "Lightshot · prnt.sc (unavailable in this version)",
-    custom: "Custom server",
-    nativeOnly: "Available in the desktop app",
-    fileHint: "PNG keeps text sharp. JPEG produces smaller files.",
-    enabled: "Enabled",
-    failed: "Could not save settings. ",
-  },
-};
+type SettingsKey = Extract<I18nKey, `settings.${string}`> extends `settings.${infer N}`
+  ? N
+  : never;
+/** Copy for the settings page, always in the saved (not draft) language. */
+const c = new Proxy({} as Record<SettingsKey, string>, {
+  get: (_, key) => tr(`settings.${String(key)}` as I18nKey),
+});
 const clone = (s: Settings): Settings =>
   JSON.parse(JSON.stringify(s)) as Settings;
 const esc = (v: string) =>
@@ -172,6 +72,18 @@ export function canonicalShortcut(value: string): string {
     .sort()
     .join("+");
 }
+/** True when the settings page mounted in `container` has unsaved edits. */
+export function hasUnsavedSettings(container: HTMLElement): boolean {
+  const state = drafts.get(container);
+  return (
+    !!state && JSON.stringify(state.draft) !== JSON.stringify(state.original)
+  );
+}
+/** Drops retained edits so the next mount starts from the saved settings. */
+export function discardSettingsDraft(container: HTMLElement): void {
+  drafts.get(container)?.cleanup();
+  drafts.delete(container);
+}
 export function mountSettings(
   container: HTMLElement,
   settings: Settings,
@@ -217,7 +129,7 @@ export function mountSettings(
       cleanup,
     });
   const dirty = () => JSON.stringify(draft) !== JSON.stringify(original);
-  const t = () => copy[draft.language];
+  const t = () => c;
   function message(text: string, isError = false) {
     status = text;
     error = isError;
@@ -229,11 +141,7 @@ export function mountSettings(
     if (el) {
       el.textContent =
         status ||
-        (dirty()
-          ? draft.language === "tr"
-            ? "Kaydedilmemiş değişiklikler"
-            : "Unsaved changes"
-          : "");
+        (dirty() ? c.unsaved : "");
       el.classList.toggle("is-error", error);
       el.classList.toggle("is-pending", !status && dirty());
     }
@@ -248,7 +156,7 @@ export function mountSettings(
   function render() {
     stopRecording();
     persist();
-    const c = t();
+    setLanguage(original.language);
     container.innerHTML = `<section class="settings-view"><header class="settings-heading"><h1>${c.title}</h1></header>${!native ? `<p class="settings-preview">${c.desktop}</p>` : ""}<div class="settings-tabs" role="tablist" aria-label="${c.title}">${(["general", "keys", "file", "upload"] as const).map((id) => `<button type="button" role="tab" id="settings-tab-${id}" aria-selected="${id === active}" aria-controls="settings-panel" tabindex="${id === active ? 0 : -1}" data-tab="${id}">${c[id]}</button>`).join("")}</div><form class="settings-form"><div id="settings-panel" role="tabpanel" aria-labelledby="settings-tab-${active}" class="settings-panel"></div><footer class="settings-footer"><p class="settings-status ${error ? "is-error" : ""}" role="status" aria-live="polite">${esc(status)}</p><div><button type="button" class="settings-cancel">${c.cancel}</button><button type="submit" class="settings-save" ${busy ? "disabled" : ""}>${busy ? c.saving : c.save}</button></div></footer></form></section>`;
     view = container.querySelector<HTMLElement>(".settings-view")!;
     view.setAttribute("aria-busy", String(busy));
@@ -261,13 +169,13 @@ export function mountSettings(
     ) =>
       `<label class="settings-toggle"><span>${c[field as keyof typeof c]}${hint && (field === "launchAtStartup" || disabled) ? `<small>${hint}</small>` : ""}</span><input type="checkbox" role="switch" data-field="${field}" ${draft[field] ? "checked" : ""} ${disabled ? "disabled" : ""}></label>`;
     if (active === "general")
-      panel.innerHTML = `<h2>${c.system}</h2><div class="settings-toggle-list settings-startup">${toggle("launchAtStartup", !native, native ? c.startupHint : c.nativeOnly)}</div><h2>${c.behavior}</h2><div class="settings-toggle-list">${(["autoCopyLink", "closeAfterUpload", "notifications", "rememberRegion"] as const).map((k) => toggle(k)).join("")}${toggle("showCursor", !native || !/Win/i.test(navigator.platform), draft.language === "tr" ? "İmleç yakalama Windows masaüstü uygulamasında kullanılabilir" : "Cursor capture is available in the Windows desktop app")}</div><label class="settings-field">${c.language}<select data-field="language"><option value="tr" ${draft.language === "tr" ? "selected" : ""}>Türkçe</option><option value="en" ${draft.language === "en" ? "selected" : ""}>English</option></select></label>`;
+      panel.innerHTML = `<h2>${c.system}</h2><div class="settings-toggle-list settings-startup">${toggle("launchAtStartup", !native, native ? c.startupHint : c.nativeOnly)}</div><h2>${c.behavior}</h2><div class="settings-toggle-list">${(["autoCopyLink", "closeAfterUpload", "notifications", "rememberRegion"] as const).map((k) => toggle(k)).join("")}${toggle("showCursor", !native || !/Win/i.test(navigator.platform), c.cursorHint)}</div><label class="settings-field">${c.language}<select data-field="language"><option value="tr" ${draft.language === "tr" ? "selected" : ""}>Türkçe</option><option value="en" ${draft.language === "en" ? "selected" : ""}>English</option></select></label>`;
     if (active === "keys")
       panel.innerHTML = `<h2>${c.keys}</h2><p class="settings-help">${c.keyHint}</p>${actions.map((a) => `<section class="settings-shortcut-row"><h3>${c[a]}</h3><div class="settings-key-list">${draft.shortcuts[a].map((key, i) => `<span class="settings-key"><kbd>${esc(key.replace("CommandOrControl", "Ctrl / ⌘"))}</kbd><button type="button" data-remove="${a}:${i}" aria-label="${esc(c[a] + " · " + key + " ×")}">×</button></span>`).join("") || `<span class="settings-help">${c.disabled}</span>`}<button type="button" class="settings-add" data-record="${a}" aria-label="${c[a]} · ${c.add}">+ ${c.add}</button></div></section>`).join("")}<p class="settings-disclosure">${c.disclosure}</p>`;
     if (active === "file")
       panel.innerHTML = `<h2>${c.file}</h2><p class="settings-help">${c.fileHint}</p><label class="settings-field">${c.format}<select data-field="format"><option value="png" ${draft.format === "png" ? "selected" : ""}>PNG</option><option value="jpeg" ${draft.format === "jpeg" ? "selected" : ""}>JPEG</option></select></label><label class="settings-field">${c.quality}<div class="settings-range"><input type="range" data-field="jpegQuality" min="1" max="100" value="${draft.jpegQuality}" ${draft.format === "png" ? "disabled" : ""}><output>${draft.jpegQuality}%</output></div></label><label class="settings-field">${c.directory}<input data-field="saveDirectory" value="${esc(draft.saveDirectory)}" placeholder="${/Mac/i.test(navigator.platform) ? "/Users/…/Pictures" : "C:\\Users\\…\\Pictures"}" ${!native ? "disabled" : ""}><small>${!native ? c.nativeOnly : c.directoryHint}</small></label>`;
     if (active === "upload")
-      panel.innerHTML = `<h2>${c.upload}</h2>${draft.uploadProvider === "lightshot" ? `<p class="settings-preview">${draft.language === "tr" ? "Prnt.sc doğrudan yükleme için belgelenmiş bir API sunmuyor. Özel HTTPS sunucusu seçebilir veya görüntüyü kaydedip prnt.sc üzerinden yükleyebilirsin." : "Prnt.sc does not offer a documented direct upload API. Choose a custom HTTPS server, or save the image and upload it on prnt.sc."}</p>` : ""}<p class="settings-disclosure">${c.disclosure}</p><label class="settings-field">${c.provider}<select data-field="uploadProvider"><option value="lightshot" disabled ${draft.uploadProvider === "lightshot" ? "selected" : ""}>${c.lightshot}</option><option value="custom" ${draft.uploadProvider === "custom" ? "selected" : ""}>${c.custom}</option></select></label>${draft.uploadProvider === "custom" ? `<label class="settings-field">${c.endpoint}<input data-field="uploadEndpoint" type="url" placeholder="https://example.com/upload" value="${esc(draft.uploadEndpoint)}" required></label>` : ""}<label class="settings-field">${c.proxy}<input data-field="proxyUrl" type="password" autocomplete="off" placeholder="http://server:8080" value="${esc(draft.proxyUrl)}" ${!native ? "disabled" : ""}><small>${!native ? c.nativeOnly : c.proxyHint}</small></label>`;
+      panel.innerHTML = `<h2>${c.upload}</h2><p class="settings-disclosure">${c.disclosure}</p><label class="settings-field">${c.provider}<select data-field="uploadProvider"><option value="custom" selected>${c.custom}</option></select><small>${c.lightshotNote}</small></label>${draft.uploadProvider === "custom" ? `<label class="settings-field">${c.endpoint}<input data-field="uploadEndpoint" type="url" placeholder="https://example.com/upload" value="${esc(draft.uploadEndpoint)}" required></label>` : ""}<label class="settings-field">${c.proxy}<input data-field="proxyUrl" type="text" autocomplete="off" spellcheck="false" placeholder="http://server:8080" value="${esc(draft.proxyUrl)}" ${!native ? "disabled" : ""}><small>${!native ? c.nativeOnly : c.proxyHint}</small></label>`;
     const focusTab = () =>
       container
         .querySelector<HTMLButtonElement>(`[data-tab="${active}"]`)!
@@ -342,7 +250,7 @@ export function mountSettings(
         const [a, i] = btn.dataset.remove!.split(":");
         btn.setAttribute(
           "aria-label",
-          `${draft.language === "tr" ? "Kısayolu kaldır" : "Remove shortcut"}: ${draft.shortcuts[a as CaptureAction][Number(i)]}`,
+          tr("settings.removeShortcut", { key: draft.shortcuts[a as CaptureAction][Number(i)] }),
         );
         btn.title = btn.getAttribute("aria-label")!;
         btn.onclick = () => {
@@ -385,6 +293,7 @@ export function mountSettings(
         render();
         await onSave(submitted);
         original = clone(submitted);
+        setLanguage(original.language);
         status = t().saved;
         error = false;
       } catch (err) {
@@ -393,7 +302,8 @@ export function mountSettings(
         error = true;
         if (
           status.includes(t().endpointError) ||
-          status.includes(t().proxyError)
+          status.includes(t().proxyError) ||
+          status.includes(t().lightshotError)
         )
           active = "upload";
         else if (status.includes(t().duplicate)) active = "keys";
@@ -465,9 +375,11 @@ export function mountSettings(
         if (used.has(v)) throw new Error(t().duplicate);
         used.add(v);
       }
-    if (draft.uploadProvider === "custom") {
+    if ((draft.uploadProvider as string) !== "custom")
+      throw new Error(t().lightshotError);
+    if (draft.uploadEndpoint.trim()) {
       try {
-        const u = new URL(draft.uploadEndpoint);
+        const u = new URL(draft.uploadEndpoint.trim());
         if (u.protocol !== "https:" || u.username || u.password) throw 0;
       } catch {
         throw new Error(t().endpointError);
@@ -496,9 +408,7 @@ export function mountSettings(
     }
     if (draft.shortcuts[action].length >= 12) {
       message(
-        draft.language === "tr"
-          ? "Bir işlem için en fazla 12 kısayol eklenebilir."
-          : "An action can have up to 12 shortcuts.",
+        c.maxShortcuts,
         true,
       );
       return;
@@ -519,6 +429,7 @@ export function mountSettings(
         stopRecording();
         return;
       }
+      if (isFocusNavigationKey(e)) return;
       e.preventDefault();
       e.stopPropagation();
       if (e.key === "Escape") {
@@ -537,27 +448,16 @@ export function mountSettings(
       )
         return;
       if (e.type === "keyup" && e.key !== "PrintScreen") return;
-      const key =
-        e.key === "PrintScreen"
-          ? "PrintScreen"
-          : e.code.startsWith("Key")
-            ? e.code.slice(3)
-            : e.code.startsWith("Digit")
-              ? e.code.slice(5)
-              : e.key === " "
-                ? "Space"
-                : e.key;
-      if (
-        !/^(?:[A-Z0-9]|F(?:[1-9]|1[0-9]|2[0-4])|PrintScreen|Space|Insert|Delete|Home|End|PageUp|PageDown|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Tab|Enter|Backspace)$/.test(
-          key,
-        )
-      ) {
+      const key = shortcutKey(e);
+      if (!key) {
         message(
-          draft.language === "tr"
-            ? "Bu tuş desteklenmiyor. Bir harf, işlev tuşu veya PrintScreen kullan."
-            : "Use a letter, function key or PrintScreen.",
+          c.unsupportedKey,
           true,
         );
+        return;
+      }
+      if (!isValidShortcut(key, e)) {
+        message(t().shortcutModifier, true);
         return;
       }
       const shortcut = recordedShortcut(

@@ -7,7 +7,7 @@ use std::{
     io::Cursor,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Mutex,
     },
 };
@@ -20,6 +20,7 @@ use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 mod cursor_capture;
 mod desktop_capture;
+mod i18n;
 mod recording;
 #[cfg(windows)]
 mod startup;
@@ -66,7 +67,7 @@ impl Default for Settings {
             save_directory: String::new(),
             launch_at_startup: false,
             proxy_url: String::new(),
-            upload_provider: "lightshot".into(),
+            upload_provider: "custom".into(),
             upload_endpoint: String::new(),
             shortcuts: HashMap::from([
                 ("region".into(), region),
@@ -103,8 +104,10 @@ struct AppState {
     capture: Mutex<Option<Capture>>,
     history: Mutex<Vec<HistoryEntry>>,
     busy: AtomicBool,
+    capture_generation: AtomicU64,
     settings_busy: Mutex<()>,
     shortcut_error: Mutex<Option<String>>,
+    settings_error: Mutex<Option<String>>,
 }
 type Result<T> = std::result::Result<T, String>;
 fn error(e: impl std::fmt::Display) -> String {
@@ -151,6 +154,44 @@ fn read<T: serde::de::DeserializeOwned>(app: &tauri::AppHandle, name: &str) -> O
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
 }
+fn load_settings(app: &tauri::AppHandle) -> (Settings, Option<String>) {
+    let path = match data_path(app, "settings.json") {
+        Ok(path) => path,
+        Err(e) => return (Settings::default(), Some(format!("Ayarlar okunamadı: {e}"))),
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => Ok(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Settings::default(), None),
+        Err(e) => Err(error(e)),
+    };
+    let result = bytes.and_then(|bytes| {
+        let mut settings: Settings = serde_json::from_slice(&bytes).map_err(error)?;
+        if settings.upload_provider == "lightshot" {
+            settings.upload_provider = "custom".into();
+        }
+        validate(&settings)?;
+        Ok(settings)
+    });
+    match result {
+        Ok(settings) => (settings, None),
+        Err(e) => {
+            let backup = path.with_file_name(format!(
+                "settings.corrupt-{}.json",
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ));
+            let backup_result = std::fs::copy(&path, &backup)
+                .or_else(|_| std::fs::rename(&path, &backup).map(|_| 0));
+            let message = match backup_result {
+                Ok(_) => format!("Ayarlar okunamadı; yedek: {}: {e}", backup.display()),
+                Err(backup_error) => {
+                    format!("Ayarlar okunamadı: {e}; yedek oluşturulamadı: {backup_error}")
+                }
+            };
+            eprintln!("{message}");
+            (Settings::default(), Some(message))
+        }
+    }
+}
 fn https_url(value: &str) -> Result<url::Url> {
     let u = url::Url::parse(value).map_err(|_| "Geçerli HTTPS adresi gerekli".to_string())?;
     if u.scheme() != "https"
@@ -175,7 +216,7 @@ fn validate(s: &Settings) -> Result<Vec<(Shortcut, String)>> {
     if !["lightshot", "custom"].contains(&s.upload_provider.as_str()) {
         return Err("Yükleme sağlayıcısı geçersiz".into());
     }
-    if s.upload_provider == "custom" {
+    if s.upload_provider == "custom" && !s.upload_endpoint.is_empty() {
         https_url(&s.upload_endpoint)?;
     }
     if !s.proxy_url.is_empty() {
@@ -217,7 +258,7 @@ fn register(app: &tauri::AppHandle, s: &Settings) -> Result<()> {
                     tauri::async_runtime::spawn(async move {
                         if let Err(e) = start_capture(a.clone(), action).await {
                             let _ = a.emit("capture-error", &e);
-                            notify(&a, "ByShoot", &e);
+                            notify_localized(&a, i18n::Key::CaptureFailed);
                         }
                     });
                 }
@@ -237,6 +278,52 @@ fn notify(app: &tauri::AppHandle, title: &str, body: &str) {
         let _ = app.notification().builder().title(title).body(body).show();
     }
 }
+fn current_text(app: &tauri::AppHandle, key: i18n::Key) -> &'static str {
+    let state = app.state::<AppState>();
+    let settings = state.settings.lock().unwrap();
+    i18n::text(&settings.language, key)
+}
+fn notify_localized(app: &tauri::AppHandle, key: i18n::Key) {
+    notify(app, "ByShoot", current_text(app, key));
+}
+fn tray_menu(
+    app: &tauri::AppHandle,
+    language: &str,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem};
+    let capture = MenuItem::with_id(
+        app,
+        "capture",
+        i18n::text(language, i18n::Key::TrayCapture),
+        true,
+        None::<&str>,
+    )?;
+    let settings = MenuItem::with_id(
+        app,
+        "settings",
+        i18n::text(language, i18n::Key::TraySettings),
+        true,
+        None::<&str>,
+    )?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit",
+        i18n::text(language, i18n::Key::TrayQuit),
+        true,
+        None::<&str>,
+    )?;
+    Menu::with_items(app, &[&capture, &settings, &quit])
+}
+fn update_native_language(app: &tauri::AppHandle, language: &str) -> tauri::Result<()> {
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        tray.set_menu(Some(tray_menu(app, language)?))?;
+        tray.set_tooltip(Some(i18n::text(language, i18n::Key::TrayTooltip)))?;
+    }
+    if let Some(window) = app.get_webview_window("capture") {
+        window.set_title(i18n::text(language, i18n::Key::CaptureTitle))?;
+    }
+    Ok(())
+}
 fn history(app: &tauri::AppHandle, kind: &str, location: String) {
     let state = app.state::<AppState>();
     let mut list = state.history.lock().unwrap();
@@ -251,21 +338,27 @@ fn history(app: &tauri::AppHandle, kind: &str, location: String) {
         },
     );
     list.truncate(100);
-    let _ = persist(app, "history.json", &*list);
+    if let Err(e) = persist(app, "history.json", &*list) {
+        let message = format!("Geçmiş kaydedilemedi: {e}");
+        eprintln!("{message}");
+        let _ = app.emit("history-error", message);
+    }
     let _ = app.emit("history-changed", ());
 }
 #[tauri::command]
 fn get_settings(app: tauri::AppHandle) -> Settings {
-    let mut settings = app.state::<AppState>().settings.lock().unwrap().clone();
+    let state = app.state::<AppState>();
+    let mut settings = state.settings.lock().unwrap();
     if let Ok(enabled) = startup_enabled(&app) {
         settings.launch_at_startup = enabled;
     }
-    settings
+    settings.clone()
 }
 #[tauri::command]
 fn get_native_status(app: tauri::AppHandle) -> serde_json::Value {
     serde_json::json!({
         "shortcutError": app.state::<AppState>().shortcut_error.lock().unwrap().clone(),
+        "settingsError": app.state::<AppState>().settings_error.lock().unwrap().clone(),
         "nativeVersion": app.package_info().version.to_string(),
         "executablePath": std::env::current_exe().ok().map(|path| path.to_string_lossy().into_owned())
     })
@@ -276,38 +369,64 @@ fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<()> {
     let _guard = state.settings_busy.lock().unwrap();
     validate(&settings)?;
     let old = state.settings.lock().unwrap().clone();
+    let startup_changed = old.launch_at_startup != settings.launch_at_startup;
+    #[cfg(windows)]
+    let startup_snapshot = startup::snapshot()?;
     app.global_shortcut().unregister_all().map_err(error)?;
     if let Err(e) = register(&app, &settings) {
         let _ = app.global_shortcut().unregister_all();
         let restored = register(&app, &old);
+        *state.shortcut_error.lock().unwrap() = restored.as_ref().err().cloned();
         return Err(format!(
             "Kısayol kaydedilemedi: {e}; geri yükleme: {}",
             restored.err().unwrap_or_else(|| "tamam".into())
         ));
     }
 
-    let change = if settings.launch_at_startup {
-        set_startup(&app, true)
+    let change = if startup_changed {
+        set_startup(&app, settings.launch_at_startup)
     } else {
-        set_startup(&app, false)
+        Ok(())
     };
     if let Err(e) = change {
         let _ = app.global_shortcut().unregister_all();
-        let _ = register(&app, &old);
-        return Err(error(e));
-    }
-    if let Err(e) = persist(&app, "settings.json", &settings) {
-        let _ = app.global_shortcut().unregister_all();
-        let _ = register(&app, &old);
-        if old.launch_at_startup {
-            let _ = set_startup(&app, true);
-        } else {
-            let _ = set_startup(&app, false);
+        *state.shortcut_error.lock().unwrap() = register(&app, &old).err();
+        #[cfg(windows)]
+        if let Err(restore) = startup::restore(&startup_snapshot) {
+            return Err(format!("{e}; başlangıç kaydı geri yüklenemedi: {restore}"));
+        }
+        #[cfg(not(windows))]
+        if let Err(restore) = set_startup(&app, !settings.launch_at_startup) {
+            return Err(format!("{e}; başlangıç kaydı geri yüklenemedi: {restore}"));
         }
         return Err(e);
     }
+    if let Err(e) = persist(&app, "settings.json", &settings) {
+        let _ = app.global_shortcut().unregister_all();
+        *state.shortcut_error.lock().unwrap() = register(&app, &old).err();
+        #[cfg(windows)]
+        if startup_changed {
+            if let Err(restore) = startup::restore(&startup_snapshot) {
+                return Err(format!("{e}; başlangıç kaydı geri yüklenemedi: {restore}"));
+            }
+        }
+        #[cfg(not(windows))]
+        if startup_changed {
+            if let Err(restore) = set_startup(&app, !settings.launch_at_startup) {
+                return Err(format!("{e}; başlangıç kaydı geri yüklenemedi: {restore}"));
+            }
+        }
+        return Err(e);
+    }
+    let language_changed = old.language != settings.language;
+    let language = settings.language.clone();
     *state.settings.lock().unwrap() = settings;
     *state.shortcut_error.lock().unwrap() = None;
+    if language_changed {
+        if let Err(e) = update_native_language(&app, &language) {
+            eprintln!("Failed to update native language: {e}");
+        }
+    }
     app.emit("settings-changed", ()).map_err(error)
 }
 #[tauri::command]
@@ -322,6 +441,14 @@ async fn start_capture(app: tauri::AppHandle, action: String) -> Result<()> {
     if state.busy.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
+    let generation = {
+        let capture = state.capture.lock().unwrap();
+        if capture.is_some() {
+            state.busy.store(false, Ordering::SeqCst);
+            return Ok(());
+        }
+        state.capture_generation.load(Ordering::SeqCst)
+    };
     let main_was_visible = app
         .get_webview_window("main")
         .and_then(|w| w.is_visible().ok())
@@ -330,7 +457,7 @@ async fn start_capture(app: tauri::AppHandle, action: String) -> Result<()> {
         .get_webview_window("capture")
         .and_then(|w| w.is_visible().ok())
         .unwrap_or(false);
-    let result = capture_inner(&app, &action).await;
+    let result = capture_inner(&app, &action, generation).await;
     if result.is_err() {
         if !overlay_was_visible {
             let _ = close_capture(app.clone(), None);
@@ -345,7 +472,7 @@ async fn start_capture(app: tauri::AppHandle, action: String) -> Result<()> {
     state.busy.store(false, Ordering::SeqCst);
     result
 }
-async fn capture_inner(app: &tauri::AppHandle, action: &str) -> Result<()> {
+async fn capture_inner(app: &tauri::AppHandle, action: &str, generation: u64) -> Result<()> {
     let overlay = app
         .get_webview_window("capture")
         .ok_or("Yakalama penceresi hazır değil")?;
@@ -361,7 +488,7 @@ async fn capture_inner(app: &tauri::AppHandle, action: &str) -> Result<()> {
         None
     };
     if action == "region" {
-        return capture_virtual_desktop(app, &overlay, cursor_frame).await;
+        return capture_virtual_desktop(app, &overlay, cursor_frame, generation).await;
     }
     let cursor = capture_cursor(&overlay)?;
     let monitor = app
@@ -405,8 +532,25 @@ async fn capture_inner(app: &tauri::AppHandle, action: &str) -> Result<()> {
                 })
             })
             .ok_or("Etkin ekran yakalanamadı")?;
+        // Windows: capture with CAPTUREBLT so menus, thumbnail previews and
+        // layered windows on this monitor are not dropped from the picture.
+        #[cfg(target_os = "windows")]
+        let mut image = desktop_capture::capture_screen_rect(
+            m.x().map_err(error)?,
+            m.y().map_err(error)?,
+            m.width().map_err(error)?,
+            m.height().map_err(error)?,
+        )?;
+        #[cfg(not(target_os = "windows"))]
         let mut image = m.capture_image().map_err(|e| {
-            format!("Ekran yakalanamadı. macOS Ekran Kaydı iznini kontrol edin: {e}")
+            #[cfg(target_os = "macos")]
+            {
+                format!("Ekran yakalanamadı. macOS Ekran Kaydı iznini kontrol edin: {e}")
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                format!("Ekran yakalanamadı: {e}")
+            }
         })?;
         if let Some(cursor) = cursor_frame {
             cursor_capture::draw_on(&cursor, &mut image, origin.0 as f64, origin.1 as f64, 1.0);
@@ -444,7 +588,9 @@ async fn capture_inner(app: &tauri::AppHandle, action: &str) -> Result<()> {
     })
     .await
     .map_err(error)??;
-    *app.state::<AppState>().capture.lock().unwrap() = Some(capture);
+    if !publish_capture(app, capture, generation) {
+        return Ok(());
+    }
     #[cfg(not(target_os = "macos"))]
     {
         overlay
@@ -480,6 +626,7 @@ async fn capture_virtual_desktop(
     app: &tauri::AppHandle,
     overlay: &tauri::WebviewWindow,
     cursor_frame: Option<cursor_capture::CursorFrame>,
+    generation: u64,
 ) -> Result<()> {
     let cursor = capture_cursor(overlay)?;
     if let Some(main) = app.get_webview_window("main") {
@@ -503,6 +650,14 @@ async fn capture_virtual_desktop(
     })
     .await
     .map_err(error)??;
+    if app
+        .state::<AppState>()
+        .capture_generation
+        .load(Ordering::SeqCst)
+        != generation
+    {
+        return Ok(());
+    }
     let cursor_x = (cursor.x - frame.origin_x as f64) * frame.coordinate_scale;
     let cursor_y = (cursor.y - frame.origin_y as f64) * frame.coordinate_scale;
     let active_monitor = frame.monitors.iter().position(|m| {
@@ -626,10 +781,21 @@ async fn capture_virtual_desktop(
     })
     .await
     .map_err(error)??;
-    *app.state::<AppState>().capture.lock().unwrap() = Some(capture);
+    if !publish_capture(app, capture, generation) {
+        return Ok(());
+    }
     overlay
         .emit("capture-ready", serde_json::json!({"action":"region"}))
         .map_err(error)
+}
+fn publish_capture(app: &tauri::AppHandle, capture: Capture, generation: u64) -> bool {
+    let state = app.state::<AppState>();
+    let mut current = state.capture.lock().unwrap();
+    if state.capture_generation.load(Ordering::SeqCst) != generation {
+        return false;
+    }
+    *current = Some(capture);
+    true
 }
 fn capture_matches(capture: &Option<Capture>, id: &str) -> bool {
     capture.as_ref().is_some_and(|capture| capture.id == id)
@@ -768,19 +934,23 @@ fn current_capture_id(app: &tauri::AppHandle) -> Result<String> {
 }
 #[tauri::command]
 fn close_capture(app: tauri::AppHandle, capture_id: Option<String>) -> Result<()> {
+    close_capture_impl(&app, capture_id.as_deref()).map(|_| ())
+}
+fn close_capture_if_current(app: &tauri::AppHandle, capture_id: &str) -> Result<bool> {
+    close_capture_impl(app, Some(capture_id))
+}
+fn close_capture_impl(app: &tauri::AppHandle, capture_id: Option<&str>) -> Result<bool> {
     let state = app.state::<AppState>();
     let mut capture = state.capture.lock().unwrap();
-    if capture_id
-        .as_ref()
-        .is_some_and(|id| !capture_matches(&capture, id))
-    {
-        return Ok(());
+    if capture_id.is_some_and(|id| !capture_matches(&capture, id)) {
+        return Ok(false);
     }
+    state.capture_generation.fetch_add(1, Ordering::SeqCst);
     if let Some(w) = app.get_webview_window("capture") {
         w.hide().map_err(error)?;
     }
     *capture = None;
-    Ok(())
+    Ok(true)
 }
 #[tauri::command]
 fn abort_capture(app: tauri::AppHandle, capture_id: String, message: String) -> Result<()> {
@@ -840,7 +1010,7 @@ async fn copy_image(app: tauri::AppHandle, data_url: String) -> Result<()> {
             .map_err(error)?;
         history(&app, "copy", String::new());
         close_capture(app.clone(), Some(capture_id))?;
-        notify(&app, "ByShoot", "Görüntü panoya kopyalandı");
+        notify_localized(&app, i18n::Key::ImageCopied);
         Ok(())
     })
     .await
@@ -859,9 +1029,9 @@ async fn save_image(app: tauri::AppHandle, data_url: String) -> Result<Option<St
     let mut dialog = app
         .dialog()
         .file()
-        .set_title("Ekran görüntüsünü kaydet")
+        .set_title(current_text(&app, i18n::Key::SaveImage))
         .set_file_name(&name)
-        .add_filter("Image", &[extension]);
+        .add_filter(current_text(&app, i18n::Key::ImageFilter), &[extension]);
     // The overlay spans the virtual desktop. Using it directly as the owner
     // lets Windows center the dialog in a gap between physical monitors.
     let parent = app
@@ -898,7 +1068,7 @@ async fn save_image(app: tauri::AppHandle, data_url: String) -> Result<Option<St
     .await
     .map_err(error)??;
     close_capture(app.clone(), Some(capture_id))?;
-    notify(&app, "ByShoot", "Görüntü kaydedildi");
+    notify_localized(&app, i18n::Key::ImageSaved);
     Ok(Some(location))
 }
 
@@ -988,6 +1158,19 @@ mod tests {
     #[test]
     fn default_shortcuts_are_distinct_and_valid() {
         assert!(!validate(&Settings::default()).unwrap().is_empty());
+        assert_eq!(Settings::default().upload_provider, "custom");
+    }
+    #[test]
+    fn upload_result_serializes_with_public_contract() {
+        let result = UploadResult {
+            url: "https://example.com".into(),
+            copied: false,
+            closed: false,
+        };
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::json!({"url":"https://example.com", "copied":false, "closed":false})
+        );
     }
     #[test]
     fn duplicate_shortcuts_across_actions_are_rejected() {
@@ -1043,8 +1226,16 @@ mod tests {
         assert!(decode("data:image/png;base64,bad").is_err());
     }
 }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadResult {
+    url: String,
+    copied: bool,
+    closed: bool,
+}
+
 #[tauri::command]
-async fn upload_image(app: tauri::AppHandle, data_url: String) -> Result<String> {
+async fn upload_image(app: tauri::AppHandle, data_url: String) -> Result<UploadResult> {
     let capture_id = current_capture_id(&app)?;
     let s = get_settings(app.clone());
     if s.upload_provider == "lightshot" {
@@ -1086,6 +1277,12 @@ async fn upload_image(app: tauri::AppHandle, data_url: String) -> Result<String>
             response.status()
         ));
     }
+    if response
+        .content_length()
+        .is_some_and(|length| length > 65536)
+    {
+        return Err("Sunucu yanıtı çok büyük".into());
+    }
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(error)? {
         if body.len() + chunk.len() > 65536 {
@@ -1100,22 +1297,46 @@ async fn upload_image(app: tauri::AppHandle, data_url: String) -> Result<String>
         .and_then(|v| v.as_str())
         .ok_or("Yanıtta url alanı bulunamadı")?;
     https_url(link)?;
-    if s.auto_copy_link {
-        arboard::Clipboard::new()
-            .map_err(error)?
-            .set_text(link)
-            .map_err(error)?;
-    }
+    let copied = s.auto_copy_link
+        && arboard::Clipboard::new()
+            .and_then(|mut clipboard| clipboard.set_text(link))
+            .is_ok();
     history(&app, "upload", link.into());
-    if s.close_after_upload {
-        close_capture(app.clone(), Some(capture_id))?;
-    }
-    notify(&app, "ByShoot", "Görüntü yüklendi");
-    Ok(link.into())
+    // Close when requested, unless the user asked for a clipboard copy that
+    // failed: then the editor stays open so the link is not lost.
+    let closed = if s.close_after_upload && (copied || !s.auto_copy_link) {
+        close_capture_if_current(&app, &capture_id)?
+    } else {
+        false
+    };
+    notify_localized(&app, i18n::Key::ImageUploaded);
+    Ok(UploadResult {
+        url: link.into(),
+        copied,
+        closed,
+    })
 }
 #[tauri::command]
 fn get_history(app: tauri::AppHandle) -> Vec<HistoryEntry> {
     app.state::<AppState>().history.lock().unwrap().clone()
+}
+#[tauri::command]
+fn delete_history_entry(app: tauri::AppHandle, id: String) -> Result<()> {
+    let state = app.state::<AppState>();
+    let mut history = state.history.lock().unwrap();
+    let mut updated = history.clone();
+    updated.retain(|entry| entry.id != id);
+    persist(&app, "history.json", &updated)?;
+    *history = updated;
+    app.emit("history-changed", ()).map_err(error)
+}
+#[tauri::command]
+fn clear_history(app: tauri::AppHandle) -> Result<()> {
+    let state = app.state::<AppState>();
+    let mut history = state.history.lock().unwrap();
+    persist(&app, "history.json", &Vec::<HistoryEntry>::new())?;
+    history.clear();
+    app.emit("history-changed", ()).map_err(error)
 }
 #[tauri::command]
 fn open_location(app: tauri::AppHandle, location: String) -> Result<()> {
@@ -1288,15 +1509,19 @@ fn main() {
             capture: Mutex::new(None),
             history: Mutex::new(vec![]),
             busy: AtomicBool::new(false),
+            capture_generation: AtomicU64::new(0),
             settings_busy: Mutex::new(()),
             shortcut_error: Mutex::new(None),
+            settings_error: Mutex::new(None),
         })
         .manage(recording::RecordingState::default())
         .setup(|app| {
             let handle = app.handle();
-            let s = read::<Settings>(handle, "settings.json")
-                .filter(|s| validate(s).is_ok())
-                .unwrap_or_default();
+            let (mut s, settings_error) = load_settings(handle);
+            if let Ok(enabled) = startup_enabled(handle) {
+                s.launch_at_startup = enabled;
+            }
+            *app.state::<AppState>().settings_error.lock().unwrap() = settings_error;
             *app.state::<AppState>().settings.lock().unwrap() = s.clone();
             *app.state::<AppState>().history.lock().unwrap() =
                 read(handle, "history.json").unwrap_or_default();
@@ -1305,7 +1530,7 @@ fn main() {
                 "capture",
                 tauri::WebviewUrl::App("index.html?capture=1".into()),
             )
-            .title("ByShoot Capture")
+            .title(i18n::text(&s.language, i18n::Key::CaptureTitle))
             .visible(false)
             .decorations(false)
             .shadow(false)
@@ -1336,40 +1561,24 @@ fn main() {
             .build()?;
             #[cfg(not(target_os = "windows"))]
             let _ = overlay;
-            if s.launch_at_startup {
-                if let Err(e) = set_startup(handle, true) {
-                    notify(
-                        handle,
-                        "ByShoot",
-                        &format!("Başlangıç kaydı güncellenemedi: {e}"),
-                    );
-                }
-            }
             if let Err(e) = register(handle, &s) {
                 *app.state::<AppState>().shortcut_error.lock().unwrap() = Some(e.clone());
                 let _ = handle.global_shortcut().unregister_all();
                 let _ = handle.emit("capture-error", &e);
                 eprintln!("Global shortcuts unavailable: {e}");
-                notify(
-                    handle,
-                    "ByShoot",
-                    &format!("Kısayollar kaydedilemedi: {e}. Ayarlardan değiştirin."),
-                );
+                notify_localized(handle, i18n::Key::ShortcutsFailed);
             }
-            use tauri::menu::{Menu, MenuItem};
-            let capture = MenuItem::with_id(app, "capture", "Alan yakala", true, None::<&str>)?;
-            let settings = MenuItem::with_id(app, "settings", "Ayarlar", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Çıkış", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&capture, &settings, &quit])?;
-            let mut tray = tauri::tray::TrayIconBuilder::new()
-                .tooltip("ByShoot")
+            let menu = tray_menu(handle, &s.language)?;
+            let mut tray = tauri::tray::TrayIconBuilder::with_id("main-tray")
+                .tooltip(i18n::text(&s.language, i18n::Key::TrayTooltip))
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "capture" => {
                         let a = app.clone();
                         tauri::async_runtime::spawn(async move {
                             if let Err(e) = start_capture(a.clone(), "region".into()).await {
-                                notify(&a, "ByShoot", &e);
+                                let _ = a.emit("capture-error", &e);
+                                notify_localized(&a, i18n::Key::CaptureFailed);
                             }
                         });
                     }
@@ -1393,10 +1602,18 @@ fn main() {
         })
         .on_window_event(|w, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // The region picker is created per use; let it really close so
+                // the next "Alan seç" can create a fresh window.
+                if w.label() == "region" {
+                    return;
+                }
                 api.prevent_close();
                 let _ = w.hide();
                 if w.label() == "capture" {
-                    *w.state::<AppState>().capture.lock().unwrap() = None;
+                    let state = w.state::<AppState>();
+                    let mut capture = state.capture.lock().unwrap();
+                    state.capture_generation.fetch_add(1, Ordering::SeqCst);
+                    *capture = None;
                 }
             }
         })
@@ -1413,11 +1630,17 @@ fn main() {
             upload_image,
             close_capture,
             get_history,
+            delete_history_entry,
+            clear_history,
             open_location,
             quit_app,
             recording::recording_sources,
+            recording::open_recording_region,
+            recording::finish_recording_region,
             recording::recording_status,
             recording::start_recording,
+            recording::pause_recording,
+            recording::resume_recording,
             recording::stop_recording,
             recording::save_recording
         ])

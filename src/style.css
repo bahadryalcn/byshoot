@@ -570,3 +570,51 @@ kbd {
     display: none;
   }
 }
+
+.history-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.history-tools .secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.history-tools .secondary svg {
+  inline-size: 14px;
+  block-size: 14px;
+}
+.history-main {
+  flex: 1;
+  min-inline-size: 0;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  text-align: start;
+  color: inherit;
+  font: inherit;
+}
+.history-main > svg {
+  inline-size: 17px;
+  block-size: 17px;
+  color: var(--muted);
+  flex: none;
+}
+.history-actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+.history-actions .icon-button svg {
+  inline-size: 15px;
+  block-size: 15px;
+}
+@media (hover: hover) and (pointer: fine) {
+  button.history-main:hover {
+    background: oklch(95% 0.018 165);
+  }
+}
