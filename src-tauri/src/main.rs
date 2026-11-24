@@ -108,7 +108,16 @@ struct AppState {
     settings_busy: Mutex<()>,
     shortcut_error: Mutex<Option<String>>,
     settings_error: Mutex<Option<String>>,
+    /// When the current capture was published but not yet shown. A capture the
+    /// editor never presents must not block later shortcut presses forever.
+    capture_pending_since: Mutex<Option<std::time::Instant>>,
+    /// Window that was in the foreground when the shortcut was pressed; it is
+    /// reactivated when the overlay closes so Windows does not pick another one.
+    previous_foreground: Mutex<Option<isize>>,
 }
+/// A published capture that the editor has not presented within this time is
+/// considered stuck and is replaced by the next shortcut press.
+const STALE_CAPTURE: std::time::Duration = std::time::Duration::from_secs(4);
 type Result<T> = std::result::Result<T, String>;
 fn error(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -435,7 +444,33 @@ async fn start_capture(app: tauri::AppHandle, action: String) -> Result<()> {
         return Err("Yakalama işlevi geçersiz".into());
     }
     let state = app.state::<AppState>();
-    if state.capture.lock().unwrap().is_some() {
+    let overlay_visible = app
+        .get_webview_window("capture")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    if overlay_visible {
+        // A capture is already on screen: bring it back instead of ignoring
+        // the press or reporting an error.
+        if let Some(w) = app.get_webview_window("capture") {
+            focus_window(&w);
+        }
+        return Ok(());
+    }
+    let stuck = {
+        let capture = state.capture.lock().unwrap();
+        capture.is_some()
+            && !state.busy.load(Ordering::SeqCst)
+            && state
+                .capture_pending_since
+                .lock()
+                .unwrap()
+                .is_none_or(|since| since.elapsed() >= STALE_CAPTURE)
+    };
+    if stuck {
+        // The editor never presented the last capture (for example a hidden
+        // WebView did not finish loading). Drop it so this press works.
+        let _ = close_capture_impl(&app, None);
+    } else if state.capture.lock().unwrap().is_some() {
         return Ok(());
     }
     if state.busy.swap(true, Ordering::SeqCst) {
@@ -449,6 +484,7 @@ async fn start_capture(app: tauri::AppHandle, action: String) -> Result<()> {
         }
         state.capture_generation.load(Ordering::SeqCst)
     };
+    *state.previous_foreground.lock().unwrap() = foreign_foreground_window();
     let main_was_visible = app
         .get_webview_window("main")
         .and_then(|w| w.is_visible().ok())
@@ -795,6 +831,7 @@ fn publish_capture(app: &tauri::AppHandle, capture: Capture, generation: u64) ->
         return false;
     }
     *current = Some(capture);
+    *state.capture_pending_since.lock().unwrap() = Some(std::time::Instant::now());
     true
 }
 fn capture_matches(capture: &Option<Capture>, id: &str) -> bool {
@@ -880,8 +917,95 @@ fn present_capture(app: tauri::AppHandle, capture_id: String) -> Result<()> {
     {
         return Err("Yakalama penceresi ekran pikselleriyle hizalanamadı".into());
     }
+    *state.capture_pending_since.lock().unwrap() = None;
     overlay.show().map_err(error)?;
-    overlay.set_focus().map_err(error)
+    focus_window(&overlay);
+    Ok(())
+}
+/// Bring one of our windows to the foreground. Windows refuses a plain
+/// SetForegroundWindow from a background process once the shortcut's
+/// activation right has lapsed, which left the overlay visible but without
+/// keyboard focus; attaching to the current foreground thread lifts that.
+fn focus_window(window: &tauri::WebviewWindow) {
+    let _ = window.set_focus();
+    #[cfg(windows)]
+    if let Ok(hwnd) = window.hwnd() {
+        foreground::force(hwnd.0 as isize);
+    }
+}
+/// The current foreground window if it belongs to another process.
+fn foreign_foreground_window() -> Option<isize> {
+    #[cfg(windows)]
+    {
+        foreground::current_foreign()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+#[cfg(windows)]
+mod foreground {
+    use std::ffi::c_void;
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> *mut c_void;
+        fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
+        fn BringWindowToTop(hwnd: *mut c_void) -> i32;
+        fn IsWindow(hwnd: *mut c_void) -> i32;
+        fn IsWindowVisible(hwnd: *mut c_void) -> i32;
+        fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
+        fn AttachThreadInput(attach: u32, to: u32, enable: i32) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+    pub fn current_foreign() -> Option<isize> {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_null() {
+                return None;
+            }
+            let mut pid = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            (pid != std::process::id()).then_some(hwnd as isize)
+        }
+    }
+    pub fn force(target: isize) {
+        unsafe {
+            let target = target as *mut c_void;
+            if IsWindow(target) == 0 {
+                return;
+            }
+            let foreground = GetForegroundWindow();
+            if foreground == target {
+                return;
+            }
+            let current = GetCurrentThreadId();
+            let other = if foreground.is_null() {
+                0
+            } else {
+                GetWindowThreadProcessId(foreground, std::ptr::null_mut())
+            };
+            let attached =
+                other != 0 && other != current && AttachThreadInput(current, other, 1) != 0;
+            BringWindowToTop(target);
+            SetForegroundWindow(target);
+            if attached {
+                AttachThreadInput(current, other, 0);
+            }
+        }
+    }
+    /// Reactivate the window the user was working in, if it still exists.
+    pub fn restore(previous: isize) {
+        unsafe {
+            let hwnd = previous as *mut c_void;
+            if IsWindow(hwnd) != 0 && IsWindowVisible(hwnd) != 0 {
+                force(previous);
+            }
+        }
+    }
 }
 #[cfg(not(target_os = "macos"))]
 fn capture_cursor(w: &tauri::WebviewWindow) -> Result<tauri::PhysicalPosition<f64>> {
@@ -946,10 +1070,26 @@ fn close_capture_impl(app: &tauri::AppHandle, capture_id: Option<&str>) -> Resul
         return Ok(false);
     }
     state.capture_generation.fetch_add(1, Ordering::SeqCst);
+    let was_visible = app
+        .get_webview_window("capture")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
     if let Some(w) = app.get_webview_window("capture") {
         w.hide().map_err(error)?;
     }
     *capture = None;
+    *state.capture_pending_since.lock().unwrap() = None;
+    let previous = state.previous_foreground.lock().unwrap().take();
+    // Hiding a topmost tool window lets Windows activate an arbitrary window,
+    // often the desktop. Give focus back to where the user was instead.
+    #[cfg(windows)]
+    if was_visible {
+        if let Some(previous) = previous {
+            foreground::restore(previous);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (was_visible, previous);
     Ok(true)
 }
 #[tauri::command]
@@ -1513,6 +1653,8 @@ fn main() {
             settings_busy: Mutex::new(()),
             shortcut_error: Mutex::new(None),
             settings_error: Mutex::new(None),
+            capture_pending_since: Mutex::new(None),
+            previous_foreground: Mutex::new(None),
         })
         .manage(recording::RecordingState::default())
         .setup(|app| {

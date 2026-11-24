@@ -968,7 +968,14 @@ export async function mountEditor(
       action = next.action ?? action ?? "region";
       const img = new Image();
       img.src = next.dataUrl;
-      await img.decode();
+      // A hidden WebView can stall decoding; never wait forever, or the
+      // pending capture would swallow every later shortcut press.
+      await Promise.race([
+        img.decode(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(t("editor.viewportTimeout"))), 3000),
+        ),
+      ]);
       if (token !== generation) return;
       if (native) {
         await waitForCaptureViewport(next, root);
