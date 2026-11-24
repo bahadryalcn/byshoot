@@ -12,14 +12,17 @@ built with Rust, Tauri and TypeScript using the system WebView.
 
 - Select an area across multiple monitors, including negative screen positions.
 - Draw, highlight, add arrows and notes, number steps, or pixelate private details.
+  Select, move, delete or re-edit an annotation after drawing it.
 - Copy image pixels to the clipboard or save PNG/JPEG files.
-- Record a selected monitor to MP4, optionally with an audio input, or record
-  audio alone to WAV on Windows.
+- Record a whole monitor or a selected area to MP4, optionally with an audio
+  input, or record audio alone to WAV on Windows. Pause and resume while
+  recording.
 - Set global shortcuts, include the Windows cursor, remember a selected region,
   and start quietly in the system tray.
 - Upload screenshots to your own HTTPS service after confirmation.
+- Review, open, copy or delete recent operations in the history page.
 
-The application interface is Turkish; settings also support English. Screenshot
+The application interface is available in Turkish and English. Screenshot
 support is included for Windows and macOS. Prebuilt downloads currently target
 Windows x64; macOS must be built on a Mac.
 
@@ -38,16 +41,20 @@ the default capture shortcut is **Cmd+Shift+S**.
 ### Recording
 
 Open **Kayıt**, choose **Ekran videosu** or **Yalnız ses**, select the monitor
-and audio input, then choose **Kaydı başlat**. Stop with **Kaydı durdur** and
-save with **Dosyaya kaydet**. A stop control stays available while navigating
-other pages. Minimizing keeps recording active; quitting finalizes the file.
+and audio input, then choose **Kaydı başlat**. Choose **Alan seç** to drag the
+area of the monitor to record. **Duraklat** and **Devam et** pause and resume;
+the parts are joined into one file when you stop. Stop with **Kaydı durdur**
+and save with **Dosyaya kaydet**. Stop, pause and resume controls stay
+available while navigating other pages. Minimizing keeps recording active;
+quitting finalizes the file.
 
-Recording needs FFmpeg on `PATH` with `gdigrab`, `dshow`, `libx264` and AAC
-support. FFmpeg is not bundled or downloaded automatically. Screenshots do not
+Recording needs FFmpeg with `gdigrab`, `dshow`, `libx264` and AAC support.
+ByShoot looks for it next to the application, on `PATH`, and in Scoop or WinGet
+installs. FFmpeg is not bundled or downloaded automatically. Screenshots do not
 require it. Video can be silent; audio-only recording requires an input.
 Computer playback audio requires a Stereo Mix or virtual audio input exposed
-by Windows. Direct system loopback, mixing multiple inputs, cropped-region
-recording and macOS recording are not supported.
+by Windows. Direct system loopback, mixing multiple inputs and macOS recording
+are not supported.
 
 Cancelling a save keeps the recording recoverable after restarting ByShoot.
 After a successful save to another location, the current temporary recording
